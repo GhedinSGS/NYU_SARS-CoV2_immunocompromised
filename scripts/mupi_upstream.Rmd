@@ -1,0 +1,117 @@
+```{r}
+library(ConQuR)
+library(doParallel)
+library(dplyr)
+WORKING.DIR="X:/mchung/leopoldo_segal_07/"
+```
+
+
+```{r}
+file_paths <- list.files(path = paste0(WORKING.DIR,"/AMR_analysis/coverM_against_MEGARes/"),
+                         pattern="*bracken_output.genus.txt",
+                         full.names = TRUE,
+                         recursive = T)
+
+df_list <- lapply(file_paths, function(file) if (file.info(file)$size > 0) read.delim(file) else data.frame())
+names(df_list) <- gsub(".output.txt","",basename(file_paths))
+
+taxa <- unique(unlist(lapply(df_list,function(df)df$name)))
+taxid <- unique(unlist(lapply(df_list,function(df)df$taxonomy_id)))
+
+# Create taxa counts
+counts.taxa <- as.data.frame(matrix(nrow=length(taxa),
+                                    ncol=length(file_paths)))
+rownames(counts.taxa) <- taxa
+colnames(counts.taxa) <- gsub(".output.txt","",basename(file_paths))
+for(i in 1:ncol(counts.taxa)){
+  counts.taxa[,i] <- df_list[[i]]$new_est_reads[match(rownames(counts.taxa),df_list[[i]]$name)]
+}
+counts.taxa[is.na(counts.taxa)] <- 0
+counts.raw <- counts.taxa
+
+samples <- unique(gsub("_S.*","",colnames(counts.raw)))
+```
+
+## Including Plots
+
+You can also embed plots, for example:
+
+```{r pressure, echo=FALSE}
+counts.taxa <- as.data.frame(matrix(nrow=nrow(counts.raw),
+                                    ncol=length(samples)))
+rownames(counts.taxa) <- rownames(counts.raw)
+colnames(counts.taxa) <- sort(samples)
+for(i in 1:ncol(counts.taxa)){
+  counts.taxa[,i] <- rowSums(counts.raw[,samples == colnames(counts.taxa)[i],drop=F])
+}
+```
+
+
+## Read in metadata
+```{r}
+runs <- list.files(paste0(WORKING.DIR,"/pipeline_output/"))
+
+metadata.imsupp <- read.delim(paste0(WORKING.DIR,"/tables/w1to3_smpl_metadatamapping_covidpos_intub_imsupp_sequenced.csv"),
+                              sep=",")
+metadata.notimsupp <- read.delim(paste0(WORKING.DIR,"/tables/w1to3_smpl_metadatamapping_covidpos_intub_notimsupp_sequenced.csv"),
+                                 row.names = 1,
+                              sep=",")
+```
+
+## Fix metadata information
+
+```{r}
+metadata <- as.data.frame(rbind(metadata.imsupp[,intersect(colnames(metadata.imsupp),colnames(metadata.notimsupp))],
+                                metadata.notimsupp[,intersect(colnames(metadata.imsupp),colnames(metadata.notimsupp))]))
+metadata <- metadata[order(metadata$collection_date),]
+metadata$Sample.ID[metadata$yl_sample_id == "UCS.0136.BKG.MainEvent"] <- "UCS.0136.BKG"
+metadata <- metadata[metadata$sample_type != "Blood",] 
+metadata$imsupp <-ifelse(metadata$Sample.ID %in% metadata.imsupp$Sample.ID,"Immunosuppressed","Healthy")
+
+metadata$intub_to_sample_days <- as.numeric(as.character(metadata$intub_to_sample_days))
+metadata <- metadata %>% mutate(weekpostintub=case_when(
+                  intub_to_sample_days < 7 ~ 1,
+                  intub_to_sample_days > 6 &  intub_to_sample_days < 14~ 2,
+                  intub_to_sample_days > 13 &  intub_to_sample_days < 21~ 3,
+                  intub_to_sample_days > 20 ~ 4))
+
+metadata$run <- ifelse(metadata$run1_rna == 1,"run1",
+                       ifelse(metadata$run2_rna == 1, "run2",
+                              ifelse(metadata$run3_rna == 1,"run3","pilot")))
+```
+
+```{r}
+colnames(counts.taxa) <- gsub("-",".",colnames(counts.taxa))
+counts.mupi <- counts.taxa
+counts.mupi <- counts.mupi[,colSums(counts.mupi) >= 1000]
+counts.mupi <- counts.mupi[,colnames(counts.mupi) %in% metadata$Sample.ID]
+counts.mupi <- counts.mupi[rowSums(counts.mupi) > 0,]
+
+metadata <- metadata[match(colnames(counts.mupi),metadata$Sample.ID),]
+```
+
+
+
+```{r}
+batchid <- factor(metadata$run,
+                  levels=c("run1","run2","run3"))
+
+# conqur.covar <- metadata[,c('subject_id','sample_type','adm_to_sample_days')]
+conqur.covar <- metadata[,c('sample_type','adm_to_sample_days')]
+
+conqur.covar$sample_type <- ifelse(conqur.covar$sample_type=='TA',
+                                  1,
+                                  ifelse(conqur.covar$sample_type=='BAL',
+                                         2,
+                                         ifelse(conqur.covar$sample_type=='UA',3,4)))
+# conqur.covar$sex <- ifelse(conqur.covar$sex=='M',1,2)
+
+counts.raw <- counts.mupi
+counts.mupi <- t(ConQuR(tax_tab=t(counts.raw),
+                            batchid=batchid, 
+                            covariates=conqur.covar, 
+                            batch_ref="run1"))
+
+save(counts.mupi,
+     file=paste0(WORKING.DIR,"/mupi_upstream.R"))
+```

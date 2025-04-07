@@ -1,0 +1,447 @@
+# Preanalysis
+
+## Load packages
+```{r}
+library(decontam)
+library(ggplot2)
+library(ggpubr)
+library(ggtext)
+library(matrixStats)
+
+WORKING.DIR="Z:/mchung/leopoldo_segal_07/"
+# WORKING.DIR="X:/mchung/leopoldo_segal_07/"
+
+```
+
+## Load upstream object
+```{r}
+load(paste0(WORKING.DIR,"/upstream.R"))
+# load(paste0(WORKING.DIR,"/upstream22.R"))
+
+```
+
+
+# Find contaminants
+
+## Set functions
+
+```{r}
+wilcox_contam_test <- function(relab,neg){
+  threshold <- 0.05
+  
+  p.value <- apply(relab,1,function(x){return(wilcox.test(as.numeric(as.character(x[!neg])),
+                                                          as.numeric(as.character(x[neg])),
+                                                          alternative="less",exact=FALSE)$p.value)})
+  fdr <- unlist(lapply(p.value,function(x){return(p.adjust(x, method="BH", n = length(p.value)))}))
+  
+  contam <- as.data.frame(cbind(p.value,
+                                fdr,
+                                ifelse(p.value < 0.05 ,T, F)))
+  rownames(contam) <- rownames(relab)
+  colnames(contam) <- c("p.value","fdr","contaminant")
+  return(contam)
+}
+
+identify_contam <- function(counts,relab,comparison.list){
+  contam <- list()
+  print(length(comparison.list))
+
+  for(i in 1:length(comparison.list)){
+    contam[[i]] <- list()
+    
+    counts.subset <- counts[,unlist(comparison.list[[i]])]
+    relab.subset <- relab[,unlist(comparison.list[[i]])]
+    libsizes <- colSums(counts.subset)
+    bkg.samples <- c(rep(F,length(unlist(comparison.list[[i]][1]))),
+                     rep(T,length(unlist(comparison.list[[i]][2]))))
+    
+    contam[[i]]$prev <- isContaminant(t(as.matrix(counts.subset)),
+                                       method="prevalence",
+                                       neg=bkg.samples,
+                                       threshold=0.5)
+    contam[[i]]$freq <- isContaminant(t(as.matrix(counts.subset)),
+                                     method="frequency",
+                                     neg=bkg.samples,
+                                     conc=libsizes,
+                                     threshold=0.5)
+    contam[[i]]$combined <- isContaminant(t(as.matrix(counts.subset)),
+                                         method="combined",
+                                         neg=bkg.samples,
+                                         conc=libsizes,
+                                         threshold=0.5)
+    contam[[i]]$wilcox <- wilcox_contam_test(relab.subset,
+                                             neg=bkg.samples)
+  }
+  names(contam) <- names(comparison.list)
+  return(contam)
+}
+
+plot_contam_plot <- function(contam,contam.prev,contam.freq,contam.combined,taxa){
+  plot.df <- as.data.frame(rbind(cbind("Mann-Whitney U test",rownames(contam)[contam$contaminant == T]),
+                                 cbind("decontam prevalence",rownames(contam.prev)[contam.prev$contaminant == T]),
+                                 cbind("decontam frequency",rownames(contam.freq)[contam.freq$contaminant == T]),
+                                 cbind("decontam combined",rownames(contam.combined)[contam.combined$contaminant == T])))
+  plot.df <- plot.df[plot.df[,2] %in% taxa,]
+  # 
+  # for(i in 1:length(taxa)){
+  #   plot.df[,2] <- gsub(taxa[i],paste0(taxa[i], " (",i,")"),plot.df[,2])
+  #   taxa[i] <- paste0(taxa[i], " (",i,")")
+  # }
+  plot.df[,1] <- factor(plot.df[,1],levels=c("Mann-Whitney U test","decontam prevalence","decontam frequency","decontam combined"))
+  plot.df[,2] <- factor(plot.df[,2],levels=rev(taxa))
+  plot <- ggplot()+
+    geom_point(mapping=aes(x=!!plot.df[,1],y=!!plot.df[,2],color=!!plot.df[,1]),size=2)+
+    guides(color = "none")+
+    theme_bw()+  
+    scale_color_discrete(drop=FALSE) +
+    scale_x_discrete(drop = FALSE)+
+    scale_y_discrete(drop = FALSE)+
+    theme(axis.title.x = element_blank(),
+          axis.title.y = element_blank(),
+          axis.text.x = element_text(angle = 45, hjust = 1))
+  
+  return(plot)
+}
+
+plot_top_taxa_facet_boxplot <- function(relab.df,order.df,
+                               contam_method,
+                               contam,
+                               annotation.taxa){
+  taxa <- rownames(order.df)[order(-rowMedians(as.matrix(order.df)))][1:30]
+  
+  plot.df <- reshape2::melt(as.matrix(relab.df[taxa,]))
+  plot.df[,4] <- annotation.taxa$superkingdom[match(plot.df[,1],annotation.taxa$taxa)]
+  plot.df[,5] <- paste0(plot.df[,1], " (",match(plot.df[,1],taxa),")")
+  plot.df[,5] <- ifelse(plot.df[,1] %in% rownames(contam[[contam_method]])[contam[[contam_method]]$contaminant == 1],
+                        paste0("<span style='color:red'>", plot.df[,5], "</span>"),
+                        paste0("<span style='color:black'>", plot.df[,5], "</span>"))
+  plot.df[,5] <- factor(plot.df[,5],levels=rev(plot.df[1:30,5]))
+
+  plot <- ggplot(plot.df,aes(x=!!plot.df[,3],
+                             y=!!plot.df[,5],
+                             fill=!!plot.df[,4]))+
+    geom_boxplot()+
+    labs(x="rel. ab.",y="")+
+    guides(fill="none")+
+    facet_grid(plot.df[,4] ~ .,scales="free",space = "free")+
+    theme_bw()+
+    theme(axis.text.y=element_markdown())
+  
+  return(plot)
+}
+
+plot_top_taxa_boxplot <- function(relab.df,
+                                  order.df,
+                                  contam_method,
+                                  contam,
+                                  annotation.taxa){
+  taxa <- rownames(order.df)[order(-rowMedians(as.matrix(order.df)))][1:50]
+  
+  rank <- rank(-rowMedians(as.matrix(relab.df)))
+  names(rank) <- rownames(relab.df)
+  
+  plot.df <- reshape2::melt(as.matrix(relab.df[taxa,]))
+  plot.df[,4] <- annotation.taxa$superkingdom[match(plot.df[,1],annotation.taxa$taxa)]
+  plot.df[,5] <- paste0(plot.df[,1], " (",rank[taxa],")")
+  plot.df[,5] <- ifelse(plot.df[,1] %in% rownames(contam[[contam_method]])[contam[[contam_method]]$contaminant == 1],
+                        paste0("<span style='color:red'>", plot.df[,5], "</span>"),
+                        paste0("<span style='color:black'>", plot.df[,5], "</span>"))
+  plot.df[,5] <- factor(plot.df[,5],levels=rev(plot.df[1:50,5]))
+
+  plot <- ggplot(plot.df,aes(x=!!plot.df[,3],
+                             y=!!plot.df[,5]))+
+    geom_boxplot()+
+    labs(x="rel. ab.",y="")+
+    guides(fill="none")+
+    theme_bw()+
+    theme(axis.text.y=element_markdown())
+
+  return(plot)
+}
+```
+
+## Calculate relative abundance
+
+```{r}
+counts <- counts$Bracken
+annotation <- annotation$Bracken
+
+relab <- as.data.frame(apply(counts,2,function(x){x/sum(x)*100}))
+```
+
+## Run decontam and Mann-Whitney decontam functions
+
+### Run decontam
+```{r,fig.height=13,fig.width=13}
+contam <- list()
+comparison.list <- list()
+
+comparison.list$All_vs_BKG <- list(c(which(metadata$sample_type == "BAL"),
+                                     which(metadata$sample_type == "TA"),
+                                     which(metadata$sample_type == "UA")),
+                                   which(metadata$sample_type == "Background"))
+comparison.list$LA_vs_BKG <- list(c(which(metadata$sample_type == "BAL"),
+                                    which(metadata$sample_type == "TA")),
+                                  which(metadata$sample_type == "Background"))
+comparison.list$UA_vs_BKG <- list(which(metadata$sample_type == "UA"),
+                                  which(metadata$sample_type == "Background"))
+
+contam <- identify_contam(counts,
+                          relab,
+                          comparison.list)
+```
+
+#### Add decontam lists for (LA or UA vs BKG) and (LA and UA vs BKG)
+```{r,fig.height=13,fig.width=13}
+contam$LA_or_UA_vs_BKG <- list()
+contam$LA_and_UA_vs_BKG <- list()
+
+for(i in 1:length(contam$All_vs_BKG)){
+  contam$LA_or_UA_vs_BKG[[i]] <- as.data.frame(matrix(nrow=nrow(contam$All_vs_BKG[[i]]),
+                                                      ncol=1))
+  contam$LA_or_UA_vs_BKG[[i]][,1] <- ifelse(contam$LA_vs_BKG[[i]]$contaminant == T | contam$UA_vs_BKG[[i]]$contaminant == T,
+                                            T,F)
+  rownames(contam$LA_or_UA_vs_BKG[[i]]) <- rownames(contam$All_vs_BKG[[i]])
+  colnames(contam$LA_or_UA_vs_BKG[[i]]) <- "contaminant"
+  
+  contam$LA_and_UA_vs_BKG[[i]] <- as.data.frame(matrix(nrow=nrow(contam$All_vs_BKG[[i]]),
+                                                       ncol=1))
+  contam$LA_and_UA_vs_BKG[[i]][,1] <- ifelse(contam$LA_vs_BKG[[i]]$contaminant == T & contam$UA_vs_BKG[[i]]$contaminant == T,
+                                             T,F)
+  rownames(contam$LA_and_UA_vs_BKG[[i]]) <- rownames(contam$All_vs_BKG[[i]])
+  colnames(contam$LA_and_UA_vs_BKG[[i]]) <- "contaminant"
+}
+
+names(contam$LA_or_UA_vs_BKG) <- names(contam$All_vs_BKG)
+names(contam$LA_and_UA_vs_BKG) <- names(contam$All_vs_BKG)
+```
+
+#### Plot decontam summary for representative taxa
+```{r,fig.height=10,fig.width=10}
+expected_taxa <- list(good=c("Staphylococcus aureus","Pseudomonas aeruginosa","Salmonella enterica",
+                             "Metamycoplasma salivarium","Pseudomonas aeruginosa",
+                             "Candida albicans","Rothia mucilaginosa","Klebsiella pneumoniae",
+                             "Streptococcus constellatus","Streptococcus pneumoniae","Streptococcus agalactiae",
+                             "Streptococcus mitis","Streptococcus anginosus","Streptococcus pyogenes",
+                             "Veillonella atypica","Veillonella dispar","Veillonella nakazawae",
+                             "Veillonella parvula","Veillonella sp. S12025-13",
+                             "Prevotella jejuni","Prevotella melaninogenica","Prevotella oris",
+                             "Prevotella sp. oral taxon 299","Prevotella denticola",
+                             "SARS-CoV2"),
+                      contam=c("Bacillus anthracis",
+                               "Aspergillus oryzae","Yersinia pestis","Burkholderia pseudomallei",
+                               "Flavobacterium sediminis","Flavobacterium columnare","Flavobacterium davisii",
+                               "Flavobacterium kingsejongi","Flavobacterium anhuiense",
+                               "Burkholderia thailandensis"))
+
+expected_taxa <- lapply(expected_taxa,function(x){rev(sort(x))})
+
+plot.df <- as.data.frame(matrix(nrow=0,
+                                ncol=length(unlist(expected_taxa))))
+for(i in 1:length(contam)){
+  for(j in 1:length(contam[[i]])){
+    plot.df <- as.data.frame(rbind(plot.df,
+                                   contam[[i]][[j]]$contaminant[match(as.character(unlist(expected_taxa)),rownames(contam[[i]][[j]]))]))
+    rownames(plot.df)[nrow(plot.df)] <- paste0(names(contam)[i]," | ",names(contam[[i]])[j])
+  }
+}
+colnames(plot.df) <- as.character(unlist(expected_taxa))
+
+plot.df <- reshape2::melt(as.matrix(plot.df))
+plot.df[,4] <- ifelse(plot.df[,2] %in% expected_taxa$contam,
+                      "known contaminant","expected taxa")
+
+plot.df[,3][is.na(plot.df[,3])] <- 0
+for(i in 1:nrow(plot.df)){
+  if(plot.df[i,4] == "known contaminant"){
+    if(plot.df[i,3] == 1){
+      plot.df[i,5] <- "Correctly labeled contaminant"
+    }else{
+      plot.df[i,5] <- "Incorrectly labeled"
+    }
+  }else{
+    if(plot.df[i,3] == 1){
+      plot.df[i,5] <- "Incorrectly labeled"
+    }else{
+      plot.df[i,5] <- "Correctly labeled expected taxa"
+    }
+  }
+}
+
+#plot.df <- plot.df[plot.df[,5] != "Incorrectly labeled",]
+
+plot1 <- ggplot(data=plot.df,aes(x=plot.df[,1],fill=plot.df[,5]))+
+  geom_bar()+
+  scale_fill_manual(values=c("red","darkblue","darkgrey"))+
+  labs(fill="Group")+
+  theme_bw()+
+  theme(axis.title.x = element_blank(),
+        axis.text.x = element_blank())
+
+plot2 <- ggplot(data=plot.df,aes(x=plot.df[,1],y=plot.df[,2],fill=plot.df[,5]))+
+  facet_grid(plot.df[,4] ~ . ,scales="free",space="free")+
+  geom_tile(colour = "grey50")+
+  scale_fill_manual(values=c("red","darkblue","darkgrey"))+
+  guides(fill="none")+
+  theme_bw()+
+  theme(axis.title.x = element_blank(),
+        axis.title.y = element_blank(),
+        axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1))
+
+egg::ggarrange(plot1,plot2,
+               nrow=2,
+               heights = c(1,5),
+               labels = LETTERS[1:2])
+```
+
+
+#### Plot decontam results
+```{r,fig.height=13,fig.width=13}
+title <- "contam method: LA and UA vs BKG"
+comp <- "LA_and_UA_vs_BKG"
+
+order.df <- relab[,which(metadata$sample_type != "Background")]
+taxa <- rownames(order.df)[order(-rowMedians(as.matrix(order.df)))][1:100]
+plot1 <- plot_contam_plot(contam[[comp]]$wilcox,
+                 contam[[comp]]$prev,
+                 contam[[comp]]$freq,
+                 contam[[comp]]$combined,
+                 taxa)+
+  labs(title="Top Non-BKG Taxa")
+
+order.df <- relab[,which(metadata$sample_type == "Background")]
+taxa <- rownames(order.df)[order(-rowMedians(as.matrix(order.df)))][1:100]
+plot2 <- plot_contam_plot(contam[[comp]]$wilcox,
+                          contam[[comp]]$prev,
+                          contam[[comp]]$freq,
+                          contam[[comp]]$combined,
+                          taxa)+
+  labs(title="Top BKG Taxa")
+
+plot <- egg::ggarrange(plot1,plot2,
+                       ncol=2,
+                       labels = c("A","B"))
+annotate_figure(plot,
+                top = text_grob(title,color="red",size = 10,x=0,hjust = 0))
+```
+
+#### Plot top taxa in each sample type
+
+```{r,fig.height=8,fig.width=15}
+title <- "contam method: LA and UA vs BKG | red taxa labeled as contaminants using decontam prevalence\n"
+comp <- "LA_and_UA_vs_BKG"
+contam.method <- "prev"
+
+plot1 <- plot_top_taxa_facet_boxplot(relab.df = relab[,which(metadata$sample_type == "BAL" | 
+                                                              metadata$sample_type == "TA")],
+                                     order.df = relab[,which(metadata$sample_type == "BAL" | 
+                                                                       metadata$sample_type == "TA")],
+                                     contam_method = contam.method,
+                                     contam = contam[[comp]],
+                                     annotation)+
+  labs(title="Top BAL+TA Taxa")
+
+plot2 <- plot_top_taxa_facet_boxplot(relab.df = relab[,which(metadata$sample_type == "UA")],
+                                     order.df = relab[,which(metadata$sample_type == "UA")],
+                                     contam_method = contam.method,
+                                     contam = contam[[comp]],
+                                     annotation)+
+  labs(title="Top UA Taxa")
+
+plot3 <- plot_top_taxa_facet_boxplot(relab.df = relab[,which(metadata$sample_type == "Background")],
+                                     order.df = relab[,which(metadata$sample_type == "Background")],
+                                     contam_method = contam.method,
+                                     contam = contam[[comp]],
+                                     annotation)+
+  labs(title="Top BKG Taxa")
+
+plot <- egg::ggarrange(plot1,plot2,plot3,
+                       nrow=1,
+                       labels = LETTERS[1:3])
+
+annotate_figure(plot,
+                top = text_grob(title,color="red",size = 10,x=0,hjust = 0))
+```
+
+#### Plot comparison box plots
+
+```{r,fig.height=13,fig.width=15}
+order.df <- relab[,which(metadata$sample_type == "BAL" |
+                                   metadata$sample_type == "TA")]
+  # order.df <- relab[,which(metadata$sample_type == "Background")]
+title <- "contam method: LA and UA vs BKG | red taxa labeled as contaminants using decontam prevalence | ordered by top BAL+TA taxa\n"
+comp <- "LA_and_UA_vs_BKG"
+contam.method <- "prev"
+
+plot1 <- plot_top_taxa_boxplot(relab.df = relab[,which(metadata$sample_type == "BAL" | 
+                                                              metadata$sample_type == "TA")],
+                               order.df = order.df,
+                               contam_method = contam.method,
+                               contam = contam[[comp]],
+                               annotation)+
+  geom_boxplot(fill="blue")+
+  labs(title="BAL+TA Taxa")
+
+plot2 <- plot_top_taxa_boxplot(relab.df = relab[,which(metadata$sample_type == "UA")],
+                               order.df = order.df,
+                               contam_method = contam.method,
+                               contam = contam[[comp]],
+                               annotation)+
+  geom_boxplot(fill="orange")+
+  labs(title="UA Taxa")
+
+
+plot3 <- plot_top_taxa_boxplot(relab.df = relab[,which(metadata$sample_type == "Background")],
+                               order.df = order.df,
+                               contam_method = contam.method,
+                               contam = contam[[comp]],
+                               annotation)+
+  geom_boxplot(fill="grey")+
+  labs(title="BKG Taxa")
+
+
+plot <- egg::ggarrange(plot1,plot2,plot3,
+                       nrow=1,
+                       labels = LETTERS[1:3])
+
+pdf(paste0(WORKING.DIR,"/plots/contam.boxplot.pdf"),
+    height=11,
+    width=15,
+    onefile = T)
+annotate_figure(plot,
+                top = text_grob(title,color="red",size = 10,x=0,hjust = 0))
+dev.off()
+```
+
+#### Output contam summary table
+```{r}
+comp <- "LA_and_UA_vs_BKG"
+contam.method <- "prev"
+
+output.df <- contam[[comp]][[contam.method]]
+
+output.df <- cbind(rownames(output.df),
+                   output.df[,1])
+colnames(output.df) <- c("taxa","is_contaminant")
+output.df <- as.data.frame(output.df)
+
+df <- relab[,which(metadata$sample_type == "BAL" | 
+                             metadata$sample_type == "TA")]
+output.df$LA_median_relab <- rowMedians(as.matrix(df))
+output.df$LA_rank <- rank(-rowMedians(as.matrix(df)))
+
+df <- relab[,which(metadata$sample_type == "UA")]
+output.df$UA_median_relab <- rowMedians(as.matrix(df))
+output.df$UA_rank <- rank(-rowMedians(as.matrix(df)))
+
+df <- relab[,which(metadata$sample_type == "Background")]
+output.df$BKG_median_relab <- rowMedians(as.matrix(df))
+output.df$BKG_rank <- rank(-rowMedians(as.matrix(df)))
+
+write.table(output.df,
+            paste0(WORKING.DIR,"/tables/contam.",comp,".",contam.method,".tsv"),
+            row.names = F,
+            col.names = T,
+            quote = F,
+            sep = "\t")
+```

@@ -1,0 +1,914 @@
+---
+title: "cluster_v3"
+output: html_document
+---
+
+# Preanalysis
+
+## Set inputs
+```{r, results='hide'}
+library(DESeq2)
+library(dplyr)
+# library(egg)
+# library(edgeR)
+library(ggplot2)
+library(ggrepel)
+# library(limma)
+# library(matrixStats)
+library(tibble)
+library(vegan)
+library(viridis)
+
+WORKING.DIR="Z:/mchung/leopoldo_segal_07/"
+```
+
+## Load R objects
+```{r}
+load(paste0(WORKING.DIR,"/upstream.R"))
+load(paste0(WORKING.DIR,"/de_analysis.R"))
+source("Z:/mchung/pipelines/SGSlab_metagenomics/scripts/cluster_functions.R")
+```
+
+```{r}
+metadata.BAL <- metadata[metadata$sample_type == "BAL",]
+metadata.BAL <- metadata.BAL[!(duplicated(metadata.BAL$subject_id)),]
+
+metadata.TA <- metadata[metadata$sample_type == "TA",]
+metadata.TA <- metadata.TA[!(duplicated(metadata.TA$subject_id)),]
+
+metadata.UA <- metadata[metadata$sample_type == "UA",]
+metadata.UA <- metadata.UA[!(duplicated(metadata.UA$subject_id)),]
+```
+
+
+# Plot dates of all samples
+
+```{r,fig.height=11,fig.width=11}
+plot.df <- as.data.frame(matrix(nrow=nrow(metadata),
+                                ncol=0))
+plot.df$patient <- factor(metadata$subject_id,levels=rev(as.numeric(as.character(unique(metadata$subject_id)))))
+plot.df$patient <- factor(metadata$study_id)
+plot.df$sample_type <- as.factor(metadata$sample_type)
+plot.df$days_post_intub <- as.numeric(as.character(as.Date(metadata$collection_date) - as.Date(metadata$intubation_date)))
+plot.df$admit_to_intub <- as.numeric(as.character((as.Date(metadata$date_hospital_adm) - as.Date(metadata$intubation_date))))
+plot.df$intub_to_discharge <- as.numeric(as.character((as.Date(metadata$date_discharge) - as.Date(metadata$intubation_date))))
+plot.df$dead_or_alive <- as.factor(metadata$dead_or_alive[match(plot.df$patient,metadata$study_id)])
+
+p1a <- ggplot(plot.df,aes(x=days_post_intub,y=patient,color=sample_type,shape=sample_type))+
+  geom_segment(aes(x=admit_to_intub,xend=intub_to_discharge,y=patient),color="grey")+
+  geom_vline(aes(xintercept=0),color="red",lty="dashed")+
+  facet_grid(dead_or_alive~ .,scales="free_y",space="free_y")+
+  scale_color_manual(values=c("grey","blue","purple","orange","darkgrey","green","red"))+
+  scale_shape_manual(values=c(17,17,17,17,15,16,16))+
+  geom_point(aes(x=admit_to_intub,y=patient,color="Admission",shape="Admission"))+
+  geom_point(aes(x=intub_to_discharge,y=patient,color=dead_or_alive,shape=dead_or_alive))+
+  geom_point()+
+  labs(x="days post intubation",y="patient",color="Event",shape="Event")+
+  coord_cartesian(xlim=c(-40,100))+
+  scale_x_continuous(expand=c(0,0))+
+  theme_bw()+
+  theme(panel.grid.major.y = element_blank(),
+        axis.ticks.y = element_blank(),
+        axis.text.y = element_blank(),
+        legend.position="bottom",
+        strip.text = element_blank(),
+        strip.background = element_blank())
+
+p1b <- ggplot(plot.df,aes(x=days_post_intub,y=patient,color=sample_type,shape=sample_type))+
+  geom_segment(aes(x=admit_to_intub,xend=intub_to_discharge,y=patient),color="grey")+
+  geom_vline(aes(xintercept=0),color="red",lty="dashed")+
+  facet_grid(dead_or_alive~ .,scales="free_y",space="free_y")+
+  scale_x_continuous(breaks=c(100,200,300),expand=c(0,0))+
+  scale_color_manual(values=c("grey","blue","purple","orange","darkgrey","green","red"))+
+  scale_shape_manual(values=c(17,17,17,17,15,16,16))+
+  geom_point(aes(x=admit_to_intub,y=patient,color="Admission",shape="Admission"))+
+  geom_point(aes(x=intub_to_discharge,y=patient,color=dead_or_alive,shape=dead_or_alive))+
+  geom_point()+
+  guides(color='none',shape='none')+
+  labs(x="days post intubation",y="patient",color="Event",shape="Event")+
+  coord_cartesian(xlim=c(100,325))+
+  theme_bw()+
+  theme(panel.grid.major.y = element_blank(),
+        axis.title.x = element_blank(),
+        axis.ticks.y = element_blank(),
+        axis.title.y = element_blank(),
+        axis.text.y = element_blank(),
+        legend.position="bottom")
+
+pdf(paste0(WORKING.DIR,"/plots/SupFig1.pdf"),
+    height=11,
+    width=11,
+    onefile = F)
+egg::ggarrange(p1a,p1b,
+               nrow=1,
+               widths=c(5,1))
+dev.off()
+```
+
+# Plot Bray-Curtis PCoA
+
+```{r,fig.height=6,fig.width=6}
+counts <- counts$Bracken
+
+sample_types <- list("BAL_and_TA" = c("BAL","TA"),
+                     "UA" = c("UA"))
+# metadata$weekpostintub <- ifelse(metadata$weekpostintub >=3, "3+",metadata$weekpostintub)
+
+relab <- as.data.frame(apply(counts,2,function(x){x/sum(x)*100}))
+
+plot <- plot_braycurtis_pcoa(counts,
+                             metadata$sample_type,
+                             title="All Samples\n")
+
+p2 <- plot+
+  scale_color_manual(values=c("darkgrey","blue","purple","orange"))+
+  theme(plot.title = element_text(size=8))+
+  labs(title="All Samples\nPr(>F) = 0.001")
+
+pdf(paste0(WORKING.DIR,"/plots/SupFig2.pdf"),
+    height=6,
+    width=6)
+plot(p2)
+dev.off()
+```
+
+# Plot sample distribution
+
+## Set single sample list
+
+```{r}
+one_sample_per_subject <- function(metadata,sample_types, week){
+  metadata <- metadata[metadata$sample_type %in% sample_types,]
+  metadata <- metadata[metadata$weekpostintub %in% week,]
+  metadata <- metadata[!duplicated(metadata$subject_id),]
+  return(metadata$Sample.ID)
+}
+
+# samples <- list("BAL_and_TA | Week 1" = one_sample_per_subject(metadata, c("BAL","TA"), week = c(1)),
+#                 "BAL_and_TA | Week 2" = one_sample_per_subject(metadata, c("BAL","TA"), week = c(2)),
+#                 "BAL_and_TA | Week 3" = one_sample_per_subject(metadata, c("BAL","TA"), week = c(3)),
+#                 "BAL_and_TA | Week 4" = one_sample_per_subject(metadata, c("BAL","TA"), week = c(4)),
+#                 "UA | Week 1" = one_sample_per_subject(metadata, c("UA"), week = c(1)),
+#                 "UA | Week 2" = one_sample_per_subject(metadata, c("UA"), week = c(2)),
+#                 "UA | Week 3" = one_sample_per_subject(metadata, c("UA"), week = c(3)),
+#                 "UA | Week 4" = one_sample_per_subject(metadata, c("UA"), week = c(4)))
+
+samples <- list("BAL_and_TA | Week 1" = one_sample_per_subject(metadata, c("BAL","TA"), week = c(1)),
+                "BAL_and_TA | Week 2" = one_sample_per_subject(metadata, c("BAL","TA"), week = c(2)),
+                "BAL_and_TA | Week 3+" = one_sample_per_subject(metadata, c("BAL","TA"), week = c(3,4)),
+                "UA | Week 1" = one_sample_per_subject(metadata, c("UA"), week = c(1)),
+                "UA | Week 2" = one_sample_per_subject(metadata, c("UA"), week = c(2)),
+                "UA | Week 3+" = one_sample_per_subject(metadata, c("UA"), week = c(3,4)))
+```
+
+## Plot sample distribution
+
+```{r,fig.height=5,fig.width=8}
+plot.df <- as.data.frame(cbind(names(samples),
+                               unlist(lapply(samples,length))))
+plot.df[,1] <- factor(plot.df[,1],levels=rev(names(samples)))
+plot.df[,2] <- as.numeric(as.character(plot.df[,2]))
+
+for(i in 1:nrow(plot.df)){
+  metadata.subset <- metadata[match(samples[[i]],metadata$Sample.ID),]
+  plot.df[i,3] <- nrow(metadata.subset[metadata.subset$dead_or_alive == "Alive",])
+  plot.df[i,4] <- nrow(metadata.subset[metadata.subset$dead_or_alive == "Dead",])
+}
+colnames(plot.df) <- c("Sample","# of Samples","Alive","Dead")
+plot.df <- reshape2::melt(plot.df)
+plot.df <- plot.df[plot.df[,2] != "# of Samples",]
+p3 <- ggplot()+
+  geom_bar(aes(x=!!plot.df[,3],
+               y=!!plot.df[,1],
+               fill=!!plot.df[,2]),
+           color="black",
+           stat="identity")+
+  labs(x="# of samples",fill = "Outcome")+
+  theme_bw()+
+  theme(axis.title.y = element_blank(),
+        legend.position="bottom")
+```
+# Plot stats
+```{r,fig.height=9,fig.width=9}
+ggarrange(p1a,p1b,
+          ggarrange(p2,p3,
+                    ncol=1,
+                    labels=c("B","C")),
+          ncol=3,
+          widths=c(5,1,5),
+          labels=c("A"))
+```
+
+# Look at overall differences
+
+## Run MDS
+
+```{r}
+mds <- list()
+
+for(i in 1:length(sample_types)){
+  metadata.subset <- metadata[metadata$sample_type %in% sample_types[[i]],]
+  counts.subset <- counts[filter_taxa[[i]],metadata.subset$Sample.ID]
+  
+  groups <- factor(metadata.subset$is_immunosuppressed, levels=c("N","Y"))
+
+  design <- model.matrix(~groups)
+
+  colData <- as.data.frame(cbind(groups))
+  rownames(colData) <- colnames(counts.subset)
+  colnames(colData) <- c("groups")
+  
+  ddsv <- DESeqDataSetFromMatrix(countData = round(counts.subset),
+                                 colData = colData,
+                                 design = design)
+  idx <- which(colSums(counts(ddsv)) == 0)
+  if(length(idx) > 0){ddsv <- ddsv[ , -idx]}
+  
+  gm_mean = function(x, na.rm=TRUE){ exp(sum(log(x[x > 0]), na.rm=na.rm) / length(x))}
+  geoMeans = apply(counts(ddsv), 1, gm_mean)
+  
+  ddsv <- estimateSizeFactors(ddsv, geoMeans = geoMeans)
+  vsdv <- varianceStabilizingTransformation(ddsv)
+  vsdv0 <- ifelse(assay(vsdv)<0,0,assay(vsdv))
+  
+  vegdist <- vegdist(as.data.frame(t(vsdv0)),method="bray")
+  cmdScale <- cmdscale(vegdist, k=ifelse(ncol(counts) <= 10,ncol(counts)-1,10))
+  vars <- apply(cmdScale, 2, var)
+  percentVar <- round(100 * (vars/sum(vars)))
+  
+  mds[[i]] <- list()
+  mds[[i]]$vsdv <- vsdv
+  mds[[i]]$vegdist <- vegdist
+  mds[[i]]$cmdScale <- cmdScale
+  mds[[i]]$vars <- vars
+  mds[[i]]$percentVar <- percentVar
+}
+names(mds) <- names(sample_types)
+```
+
+## Use ADONIS to check for diversity metrics
+
+
+```{r,fig.height=6,fig.width=11}
+adonis_categories <- c("weekpostintub","is_immunosuppressed","age_group","bmi_group","hx_COVIDvax","dead_or_alive",
+                       "was_trached","had_ecmo","sex")
+
+metadata$weekpostintub <- ifelse(metadata$weekpostintub >=3, "3+",metadata$weekpostintub)
+# metadata$bmi_group <- ifelse(metadata$bmi >= 18.9 & metadata$bmi < 25,"Normal","Abnormal")
+metadata$bmi_group <- ifelse(metadata$bmi < 25,"<25","25+")
+metadata$age_group <- ifelse(metadata$age >= 65,"65+","<65")
+```
+
+### Alpha diversity
+```{r,fig.height=6,fig.width=11}
+alpha.plots.list <- list()
+for(i in 1:length(sample_types)){
+  metadata.subset <- metadata[metadata$sample_type %in% sample_types[[i]],]
+  
+  alpha.plots.list[[i]] <- list()
+  data_shannon <- diversity(t(counts[,metadata.subset$Sample.ID]), index = "shannon") 
+
+  for(j in 1:length(adonis_categories)){
+    groups <- metadata.subset[,adonis_categories[j]]
+  
+    plot.df <- as.data.frame(cbind(groups,data_shannon))
+    colnames(plot.df) <- c("group","shannon")
+    plot.df$shannon <- as.numeric(as.character(plot.df$shannon))
+    
+    kw <- kruskal.test(shannon ~ group, data = plot.df)
+    
+    if(length(unique(groups)) > 2){
+      col <- c("#e49433","#66c2a5","#1a9850")
+    }else{
+      col <- c("#377eb8","#e4211c")
+    }
+    
+    alpha.plots.list[[i]][[j]] <- ggplot(plot.df,aes(x=group,y=shannon,fill=group))+
+      geom_boxplot(outlier.shape = NA)+
+      geom_jitter(size=0.9,width = .05)+
+      guides(fill="none")+
+      #stat_compare_means(method = "kruskal.test")+
+      labs(title=paste0(names(sample_types)[i],"\n",adonis_categories[j],"\np = ",round(kw$p.value,3)))+
+      theme_bw()+
+      theme(plot.title = element_text(size=8),
+            axis.title.x = element_blank())+
+      scale_fill_manual(values=col)
+
+  }
+  egg::ggarrange(plots = alpha.plots.list[[i]],
+                 labels=c(LETTERS[[i]],rep("",length(alpha.plots.list[[i]])-1)),
+                 nrow=2)
+}
+
+```
+
+### Beta diversity
+
+```{r,fig.height=6,fig.width=11}
+beta.plots.list <- list()
+for(i in 1:length(sample_types)){
+  metadata.subset <- metadata[metadata$sample_type %in% sample_types[[i]],]
+  
+  beta.plots.list[[i]] <- list()
+  for(j in 1:length(adonis_categories)){
+    groups <- metadata.subset[,adonis_categories[j]]
+    
+    newResults <- as.data.frame(cbind(mds[[i]]$cmdScale,
+                                      as.character(groups)))
+    colnames(newResults)[1] <- "PC1"
+    colnames(newResults)[2] <- "PC2"
+    colnames(newResults)[ncol(newResults)] <- "groups"
+  
+    centroids <- aggregate(cbind(as.numeric(as.character(PC1)),
+                                 as.numeric(as.character(PC2))) ~ groups,
+                           data= newResults, mean)
+    colnames(centroids) <- c("groups","PC1","PC2")
+    newResults <- merge(newResults,centroids,by="groups",suffixes=c("",".centroid"))
+  
+    for(k in 2:ncol(newResults)){newResults[,k] <- as.numeric(as.character(newResults[,k]))}
+    newResults$labels <- rownames(mds[[i]]$cmdScale)
+  
+    newResults <- as.data.frame(newResults)
+  
+    data.adonis <- data.frame(colData(mds[[i]]$vsdv))
+    data.adonis$groups <- groups
+    
+    samplepermanova <- adonis2(mds[[i]]$vegdist ~ groups)
+    # samplepermanova <- as.data.frame(samplepermanova$aov.tab)
+    samplepermanova <- samplepermanova$'Pr(>F)'[1]
+    
+    if(length(unique(groups)) > 2){
+      col <- c("#e49433","#66c2a5","#1a9850")
+    }else{
+      col <- c("#377eb8","#e4211c")
+    }
+    
+    beta.plots.list[[i]][[j]] <- ggplot() + # Graph PC1 and PC2
+      geom_segment(aes(x=!!newResults$PC1.centroid, y=!!newResults$PC2.centroid,
+                       xend=!!newResults$PC1, yend=!!newResults$PC2, color=!!newResults$groups),
+                   alpha=0.8)+
+      geom_point(aes(x=!!newResults$PC1, y=!!newResults$PC2,
+                     color=!!newResults$groups),
+                 size=2,alpha=0.5)+
+      geom_label_repel(aes(x=!!centroids$PC1, y=!!centroids$PC2, 
+                           label=!!centroids$groups,color=!!centroids$groups), size=3,alpha=0.8)+
+      labs(title=paste0(names(sample_types)[i],"\n",adonis_categories[j],"\nPr(>F) = ",samplepermanova),
+           x=paste0("PC1: ",percentVar[1],"% variance"),
+           y=paste0("PC2: ",percentVar[2],"% variance"),
+           color=names(sample_types)[i])+
+      guides(color="none")+
+      theme_bw()+
+      theme(plot.title = element_text(size=8))+
+      scale_color_manual(values=col)
+
+  }
+  egg::ggarrange(plots = beta.plots.list[[i]],
+                 labels=c(LETTERS[[i]],rep("",length(beta.plots.list[[i]])-1)),
+                 nrow=2)
+}
+```
+
+```{r,fig.height=11,fig.width=9}
+
+pdf(paste0(WORKING.DIR,"/plots/Fig2.pdf"),
+    height=11,
+    width=9,
+    onefile = F)
+egg::ggarrange(alpha.plots.list[[1]][[1]],beta.plots.list[[1]][[1]],alpha.plots.list[[1]][[2]],beta.plots.list[[1]][[2]],
+               alpha.plots.list[[1]][[3]],beta.plots.list[[1]][[3]],alpha.plots.list[[1]][[4]],beta.plots.list[[1]][[4]],
+               alpha.plots.list[[1]][[5]],beta.plots.list[[1]][[5]],alpha.plots.list[[1]][[6]],beta.plots.list[[1]][[6]],
+               alpha.plots.list[[1]][[7]],beta.plots.list[[1]][[7]],alpha.plots.list[[1]][[8]],beta.plots.list[[1]][[8]],
+               labels=c("A","","B","","C","","D","",
+                        "E","","F","","G","","H",""),
+               widths=c(1.5,2,1.5,2),
+               nrow=4)
+dev.off()
+
+
+pdf(paste0(WORKING.DIR,"/plots/SupFig3.pdf"),
+    height=11,
+    width=9,
+    onefile = F)
+egg::ggarrange(alpha.plots.list[[2]][[1]],beta.plots.list[[2]][[1]],alpha.plots.list[[2]][[2]],beta.plots.list[[2]][[2]],
+               alpha.plots.list[[2]][[3]],beta.plots.list[[2]][[3]],alpha.plots.list[[2]][[4]],beta.plots.list[[2]][[4]],
+               alpha.plots.list[[2]][[5]],beta.plots.list[[2]][[5]],alpha.plots.list[[2]][[6]],beta.plots.list[[2]][[6]],
+               alpha.plots.list[[2]][[7]],beta.plots.list[[2]][[7]],alpha.plots.list[[2]][[8]],beta.plots.list[[2]][[8]],
+               labels=c("A","","B","","C","","D","",
+                        "E","","F","","G","","H",""),
+               widths=c(1.5,2,1.5,2),
+               nrow=4)
+dev.off()
+```
+
+
+
+# Look at differences individually for each week
+
+## Run MDS
+
+```{r}
+mds <- list()
+
+for(i in 1:length(samples)){
+  sample_type <- gsub(" [|].*","",names(samples)[i])
+  
+  metadata.subset <- metadata[metadata$Sample.ID %in% samples[[i]],]
+  counts.subset <- counts[filter_taxa[[sample_type]],metadata.subset$Sample.ID]
+  
+  groups <- factor(metadata.subset$is_immunosuppressed, levels=c("N","Y"))
+
+  design <- model.matrix(~groups)
+
+  colData <- as.data.frame(cbind(groups))
+  rownames(colData) <- colnames(counts.subset)
+  colnames(colData) <- c("groups")
+  
+  ddsv <- DESeqDataSetFromMatrix(countData = round(counts.subset),
+                                 colData = colData,
+                                 design = design)
+  idx <- which(colSums(counts(ddsv)) == 0)
+  if(length(idx) > 0){ddsv <- ddsv[ , -idx]}
+  
+  gm_mean = function(x, na.rm=TRUE){ exp(sum(log(x[x > 0]), na.rm=na.rm) / length(x))}
+  geoMeans = apply(counts(ddsv), 1, gm_mean)
+  
+  ddsv <- estimateSizeFactors(ddsv, geoMeans = geoMeans)
+  vsdv <- varianceStabilizingTransformation(ddsv)
+  vsdv0 <- ifelse(assay(vsdv)<0,0,assay(vsdv))
+  
+  vegdist <- vegdist(as.data.frame(t(vsdv0)),method="bray")
+  cmdScale <- cmdscale(vegdist, k=ifelse(ncol(counts) <= 10,ncol(counts)-1,10))
+  vars <- apply(cmdScale, 2, var)
+  percentVar <- round(100 * (vars/sum(vars)))
+  
+  mds[[i]] <- list()
+  mds[[i]]$vsdv <- vsdv
+  mds[[i]]$vegdist <- vegdist
+  mds[[i]]$cmdScale <- cmdScale
+  mds[[i]]$vars <- vars
+  mds[[i]]$percentVar <- percentVar
+}
+
+names(mds) <- names(sample_types)
+```
+
+## Use ADONIS to check for diversity metrics
+
+```{r,fig.height=6,fig.width=11}
+adonis_categories <- c("is_immunosuppressed","age_group","bmi_group","hx_COVIDvax","dead_or_alive",
+                       "was_trached","had_ecmo","sex")
+```
+
+### Alpha diversity
+
+```{r,fig.height=6,fig.width=11}
+alpha.plots.list <- list()
+for(i in 1:length(mds)){
+  metadata.subset <- metadata[match(samples[[i]],metadata$Sample.ID),]
+  
+  alpha.plots.list[[i]] <- list()
+  data_shannon <- diversity(t(counts[,metadata.subset$Sample.ID]), index = "shannon") 
+
+  for(j in 1:length(adonis_categories)){
+    groups <- metadata.subset[,adonis_categories[j]]
+  
+    plot.df <- as.data.frame(cbind(groups,data_shannon))
+    colnames(plot.df) <- c("group","shannon")
+    plot.df$shannon <- as.numeric(as.character(plot.df$shannon))
+    
+    kw <- kruskal.test(shannon ~ group, data = plot.df)
+    
+    if(length(unique(groups)) > 2){
+      col <- c("#e49433","#66c2a5","#1a9850")
+    }else{
+      col <- c("#377eb8","#e4211c")
+    }
+    
+    alpha.plots.list[[i]][[j]] <- ggplot(plot.df,aes(x=group,y=shannon,fill=group))+
+      geom_boxplot(outlier.shape = NA)+
+      geom_jitter(size=0.9,width = .05)+
+      guides(fill="none")+
+      #stat_compare_means(method = "kruskal.test")+
+      labs(title=paste0(names(samples)[i],"\n",adonis_categories[j],"\np = ",round(kw$p.value,2)))+
+      theme_bw()+
+      theme(plot.title = element_text(size=8),
+            axis.title.x = element_blank())+
+      scale_fill_manual(values=col)
+  }
+  egg::ggarrange(plots = alpha.plots.list[[i]],
+                 labels=c(LETTERS[[i]],rep("",length(alpha.plots.list[[i]])-1)),
+                 nrow=2)
+}
+
+
+```
+
+
+### Beta diversity
+```{r,fig.height=6,fig.width=11}
+beta.plots.list <- list()
+for(i in 1:length(mds)){
+  
+  metadata.subset <- metadata[match(samples[[i]],metadata$Sample.ID),]
+  
+  beta.plots.list[[i]] <- list()
+  for(j in 1:length(adonis_categories)){
+    groups <- metadata.subset[,adonis_categories[j]]
+    
+    newResults <- as.data.frame(cbind(mds[[i]]$cmdScale,
+                                      as.character(groups)))
+    colnames(newResults)[1] <- "PC1"
+    colnames(newResults)[2] <- "PC2"
+    colnames(newResults)[ncol(newResults)] <- "groups"
+  
+    centroids <- aggregate(cbind(as.numeric(as.character(PC1)),
+                                 as.numeric(as.character(PC2))) ~ groups,
+                           data= newResults, mean)
+    colnames(centroids) <- c("groups","PC1","PC2")
+    newResults <- merge(newResults,centroids,by="groups",suffixes=c("",".centroid"))
+  
+    for(k in 2:ncol(newResults)){newResults[,k] <- as.numeric(as.character(newResults[,k]))}
+    newResults$labels <- rownames(mds[[i]]$cmdScale)
+  
+    newResults <- as.data.frame(newResults)
+  
+    data.adonis <- data.frame(colData(mds[[i]]$vsdv))
+    data.adonis$groups <- groups
+    
+    samplepermanova <- adonis2(mds[[i]]$vegdist ~ groups)
+    # samplepermanova <- as.data.frame(samplepermanova$aov.tab)
+    
+    samplepermanova <- samplepermanova$'Pr(>F)'[1]
+    if(length(unique(groups)) > 2){
+      col <- c("#e49433","#66c2a5","#1a9850")
+    }else{
+      col <- c("#377eb8","#e4211c")
+    }
+    
+    beta.plots.list[[i]][[j]] <- ggplot() + # Graph PC1 and PC2
+      geom_segment(aes(x=!!newResults$PC1.centroid, y=!!newResults$PC2.centroid,
+                       xend=!!newResults$PC1, yend=!!newResults$PC2, color=!!newResults$groups),
+                   alpha=0.8)+
+      geom_point(aes(x=!!newResults$PC1, y=!!newResults$PC2,
+                     color=!!newResults$groups),
+                 size=2,alpha=0.5)+
+      geom_label_repel(aes(x=!!centroids$PC1, y=!!centroids$PC2, 
+                           label=!!centroids$groups,color=!!centroids$groups), size=3,alpha=0.8)+
+      labs(title=paste0(names(samples)[i],"\n",adonis_categories[j],"\nPr(>F) = ",samplepermanova),
+           x=paste0("PC1: ",percentVar[1],"% variance"),
+           y=paste0("PC2: ",percentVar[2],"% variance"),
+           color=names(samples)[i])+
+      guides(color="none")+
+      theme_bw()+
+      theme(plot.title = element_text(size=8))+
+      scale_color_manual(values = col)
+
+  }
+  egg::ggarrange(plots = beta.plots.list[[i]],
+                 labels=LETTERS[1:length(adonis_categories)],
+                 nrow=2)
+}
+```
+
+
+```{r,fig.height=11,fig.width=15}
+labs <- for(x in 1:21){ifelse((x-1)%%3 != 0,LETTERS[[x]],"")}
+
+labs <- c()
+for (x in 1:21) { 
+  if((x-1)%%3 == 0) {
+    labs <- c(labs,LETTERS[[(x-1)/3+1]])
+  }else{
+    labs <- c(labs,"")
+  }
+}
+
+pdf(paste0(WORKING.DIR,"/plots/SupFig4.pdf"),
+    height=11,
+    width=15,
+    onefile = F)
+egg::ggarrange(alpha.plots.list[[1]][[1]],alpha.plots.list[[2]][[1]],alpha.plots.list[[3]][[1]],
+               alpha.plots.list[[1]][[2]],alpha.plots.list[[2]][[2]],alpha.plots.list[[3]][[2]],
+               alpha.plots.list[[1]][[3]],alpha.plots.list[[2]][[3]],alpha.plots.list[[3]][[3]],
+               alpha.plots.list[[1]][[4]],alpha.plots.list[[2]][[4]],alpha.plots.list[[3]][[4]],
+               alpha.plots.list[[1]][[5]],alpha.plots.list[[2]][[5]],alpha.plots.list[[3]][[5]],
+               alpha.plots.list[[1]][[6]],alpha.plots.list[[2]][[6]],alpha.plots.list[[3]][[6]],   
+               alpha.plots.list[[1]][[7]],alpha.plots.list[[2]][[7]],alpha.plots.list[[3]][[7]],
+               labels=labs,
+               ncol=6)
+dev.off()
+
+pdf(paste0(WORKING.DIR,"/plots/SupFig5.pdf"),
+    height=11,
+    width=15,
+    onefile = F)
+egg::ggarrange(alpha.plots.list[[4]][[1]],alpha.plots.list[[5]][[1]],alpha.plots.list[[6]][[1]],
+               alpha.plots.list[[4]][[2]],alpha.plots.list[[5]][[2]],alpha.plots.list[[6]][[2]],
+               alpha.plots.list[[4]][[3]],alpha.plots.list[[5]][[3]],alpha.plots.list[[6]][[3]],
+               alpha.plots.list[[4]][[4]],alpha.plots.list[[5]][[4]],alpha.plots.list[[6]][[4]],
+               alpha.plots.list[[4]][[5]],alpha.plots.list[[5]][[5]],alpha.plots.list[[6]][[5]],
+               alpha.plots.list[[4]][[6]],alpha.plots.list[[5]][[6]],alpha.plots.list[[6]][[6]],   
+               alpha.plots.list[[4]][[7]],alpha.plots.list[[5]][[7]],alpha.plots.list[[6]][[7]],
+               labels=labs,
+               ncol=6)
+dev.off()
+```    
+
+
+
+```{r,fig.height=11,fig.width=15}
+labs <- for(x in 1:21){ifelse((x-1)%%3 != 0,LETTERS[[x]],"")}
+
+labs <- c()
+for (x in 1:21) { 
+  if((x-1)%%3 == 0) {
+    labs <- c(labs,LETTERS[[(x-1)/3+1]])
+  }else{
+    labs <- c(labs,"")
+  }
+}
+
+pdf(paste0(WORKING.DIR,"/plots/SupFig6.pdf"),
+    height=11,
+    width=15,
+    onefile = F)
+egg::ggarrange(beta.plots.list[[1]][[1]],beta.plots.list[[2]][[1]],beta.plots.list[[3]][[1]],
+               beta.plots.list[[1]][[2]],beta.plots.list[[2]][[2]],beta.plots.list[[3]][[2]],
+               beta.plots.list[[1]][[3]],beta.plots.list[[2]][[3]],beta.plots.list[[3]][[3]],
+               beta.plots.list[[1]][[4]],beta.plots.list[[2]][[4]],beta.plots.list[[3]][[4]],
+               beta.plots.list[[1]][[5]],beta.plots.list[[2]][[5]],beta.plots.list[[3]][[5]],
+               beta.plots.list[[1]][[6]],beta.plots.list[[2]][[6]],beta.plots.list[[3]][[6]],   
+               beta.plots.list[[1]][[7]],beta.plots.list[[2]][[7]],beta.plots.list[[3]][[7]],
+               labels=labs,
+               ncol=6)
+dev.off()
+        
+
+pdf(paste0(WORKING.DIR,"/plots/SupFig7.pdf"),
+    height=11,
+    width=15,
+    onefile = F)
+egg::ggarrange(beta.plots.list[[4]][[1]],beta.plots.list[[5]][[1]],beta.plots.list[[6]][[1]],
+               beta.plots.list[[4]][[2]],beta.plots.list[[5]][[2]],beta.plots.list[[6]][[2]],
+               beta.plots.list[[4]][[3]],beta.plots.list[[5]][[3]],beta.plots.list[[6]][[3]],
+               beta.plots.list[[4]][[4]],beta.plots.list[[5]][[4]],beta.plots.list[[6]][[4]],
+               beta.plots.list[[4]][[5]],beta.plots.list[[5]][[5]],beta.plots.list[[6]][[5]],
+               beta.plots.list[[4]][[6]],beta.plots.list[[5]][[6]],beta.plots.list[[6]][[6]],   
+               beta.plots.list[[4]][[7]],beta.plots.list[[5]][[7]],beta.plots.list[[6]][[7]],
+               labels=labs,
+               ncol=6)
+dev.off()
+        
+```
+
+
+# Look at differences individually for each week specifically in immunosuppressed
+
+## Run MDS
+
+```{r}
+mds <- list()
+
+for(i in 1:length(samples)){
+  sample_type <- gsub(" [|].*","",names(samples)[i])
+  
+  metadata.subset <- metadata[metadata$Sample.ID %in% samples[[i]],]
+  metadata.subset <- metadata.subset[metadata.subset$is_immunosuppressed == "N",]
+  
+  counts.subset <- counts[filter_taxa[[sample_type]],metadata.subset$Sample.ID]
+  
+  # groups <- factor(metadata.subset$is_immunosuppressed, levels=c("N","Y"))
+  groups <- factor(metadata.subset$dead_or_alive, levels=c("Alive","Dead"))
+
+  design <- model.matrix(~groups)
+
+  colData <- as.data.frame(cbind(groups))
+  rownames(colData) <- colnames(counts.subset)
+  colnames(colData) <- c("groups")
+  
+  ddsv <- DESeqDataSetFromMatrix(countData = round(counts.subset),
+                                 colData = colData,
+                                 design = design)
+  idx <- which(colSums(counts(ddsv)) == 0)
+  if(length(idx) > 0){ddsv <- ddsv[ , -idx]}
+  
+  gm_mean = function(x, na.rm=TRUE){ exp(sum(log(x[x > 0]), na.rm=na.rm) / length(x))}
+  geoMeans = apply(counts(ddsv), 1, gm_mean)
+  
+  ddsv <- estimateSizeFactors(ddsv, geoMeans = geoMeans)
+  vsdv <- varianceStabilizingTransformation(ddsv)
+  vsdv0 <- ifelse(assay(vsdv)<0,0,assay(vsdv))
+  
+  vegdist <- vegdist(as.data.frame(t(vsdv0)),method="bray")
+  cmdScale <- cmdscale(vegdist, k=ifelse(ncol(counts.subset) <= 10,ncol(counts.subset)-1,10))
+  vars <- apply(cmdScale, 2, var)
+  percentVar <- round(100 * (vars/sum(vars)))
+  
+  mds[[i]] <- list()
+  mds[[i]]$vsdv <- vsdv
+  mds[[i]]$vegdist <- vegdist
+  mds[[i]]$cmdScale <- cmdScale
+  mds[[i]]$vars <- vars
+  mds[[i]]$percentVar <- percentVar
+}
+
+names(mds) <- names(sample_types)
+```
+
+
+## Use ADONIS to check for diversity metrics
+
+
+```{r,fig.height=6,fig.width=11}
+adonis_categories <- c("age_group","bmi_group","hx_COVIDvax","dead_or_alive",
+                       "was_trached","had_ecmo","sex")
+```
+
+
+### Alpha diversity
+
+```{r,fig.height=6,fig.width=11}
+alpha.plots.list <- list()
+for(i in 1:length(mds)){
+  metadata.subset <- metadata[match(samples[[i]],metadata$Sample.ID),]
+  metadata.subset <- metadata.subset[metadata.subset$is_immunosuppressed == "N",]
+
+  alpha.plots.list[[i]] <- list()
+  data_shannon <- diversity(t(counts[,metadata.subset$Sample.ID]), index = "shannon") 
+
+  for(j in 1:length(adonis_categories)){
+    groups <- metadata.subset[,adonis_categories[j]]
+  
+    plot.df <- as.data.frame(cbind(groups,data_shannon))
+    colnames(plot.df) <- c("group","shannon")
+    plot.df$shannon <- as.numeric(as.character(plot.df$shannon))
+    
+    kw <- kruskal.test(shannon ~ group, data = plot.df)
+    
+    alpha.plots.list[[i]][[j]] <- ggplot(plot.df,aes(x=group,y=shannon,fill=group))+
+      geom_boxplot(outlier.shape = NA)+
+      geom_jitter(width = .05)+
+      guides(fill="none")+
+      #stat_compare_means(method = "kruskal.test")+
+      labs(title=paste0(names(samples)[i],"\n",adonis_categories[j],"\np = ",round(kw$p.value,2)))+
+      theme_bw()+
+      theme(plot.title = element_text(size=8),
+            axis.title.x = element_blank())+
+      scale_fill_brewer(palette="Set1",direction = -1)
+
+  }
+  egg::ggarrange(plots = alpha.plots.list[[i]],
+                 labels=c(LETTERS[[i]],rep("",length(alpha.plots.list[[i]])-1)),
+                 nrow=2)
+}
+
+
+```
+
+### Beta diversity
+```{r,fig.height=6,fig.width=11}
+beta.plots.list <- list()
+for(i in 1:length(mds)){
+  metadata.subset <- metadata[match(samples[[i]],metadata$Sample.ID),]
+  metadata.subset <- metadata.subset[metadata.subset$is_immunosuppressed == "N",]
+
+  beta.plots.list[[i]] <- list()
+  for(j in 1:length(adonis_categories)){
+    groups <- metadata.subset[,adonis_categories[j]]
+    
+    newResults <- as.data.frame(cbind(mds[[i]]$cmdScale,
+                                      as.character(groups)))
+    colnames(newResults)[1] <- "PC1"
+    colnames(newResults)[2] <- "PC2"
+    colnames(newResults)[ncol(newResults)] <- "groups"
+  
+    centroids <- aggregate(cbind(as.numeric(as.character(PC1)),
+                                 as.numeric(as.character(PC2))) ~ groups,
+                           data= newResults, mean)
+    colnames(centroids) <- c("groups","PC1","PC2")
+    newResults <- merge(newResults,centroids,by="groups",suffixes=c("",".centroid"))
+  
+    for(k in 2:ncol(newResults)){newResults[,k] <- as.numeric(as.character(newResults[,k]))}
+    newResults$labels <- rownames(mds[[i]]$cmdScale)
+  
+    newResults <- as.data.frame(newResults)
+  
+    data.adonis <- data.frame(colData(mds[[i]]$vsdv))
+    data.adonis$groups <- groups
+    
+    samplepermanova <- adonis2(mds[[i]]$vegdist ~ groups)
+    # samplepermanova <- as.data.frame(samplepermanova$aov.tab)
+    samplepermanova <- samplepermanova$'Pr(>F)'[1]
+
+    beta.plots.list[[i]][[j]] <- ggplot() + # Graph PC1 and PC2
+      geom_segment(aes(x=!!newResults$PC1.centroid, y=!!newResults$PC2.centroid,
+                       xend=!!newResults$PC1, yend=!!newResults$PC2, color=!!newResults$groups),
+                   alpha=0.8)+
+      geom_point(aes(x=!!newResults$PC1, y=!!newResults$PC2,
+                     color=!!newResults$groups),
+                 size=2,alpha=0.5)+
+      geom_label_repel(aes(x=!!centroids$PC1, y=!!centroids$PC2, 
+                           label=!!centroids$groups,color=!!centroids$groups), size=3,alpha=0.8)+
+      labs(title=paste0(names(samples)[i],"\n",adonis_categories[j],"\nPr(>F) = ",samplepermanova),
+           x=paste0("PC1: ",percentVar[1],"% variance"),
+           y=paste0("PC2: ",percentVar[2],"% variance"),
+           color=names(samples)[i])+
+      guides(color="none")+
+      theme_bw()+
+      theme(plot.title = element_text(size=8))+
+      scale_color_brewer(palette="Set1",direction = -1)
+  }
+  egg::ggarrange(plots = beta.plots.list[[i]],
+                 labels=LETTERS[1:length(adonis_categories)],
+                 nrow=2)
+}
+```
+
+```{r,fig.height=11,fig.width=15}
+labs <- for(x in 1:21){ifelse((x-1)%%3 != 0,LETTERS[[x]],"")}
+
+labs <- c()
+for (x in 1:21) { 
+  if((x-1)%%3 == 0) {
+    labs <- c(labs,LETTERS[[(x-1)/3+1]])
+  }else{
+    labs <- c(labs,"")
+  }
+}
+# 
+# pdf(paste0(WORKING.DIR,"/plots/SupFig4.pdf"),
+#     height=11,
+#     width=15,
+#     onefile = F)
+egg::ggarrange(alpha.plots.list[[1]][[1]],alpha.plots.list[[2]][[1]],alpha.plots.list[[3]][[1]],
+               alpha.plots.list[[1]][[2]],alpha.plots.list[[2]][[2]],alpha.plots.list[[3]][[2]],
+               alpha.plots.list[[1]][[3]],alpha.plots.list[[2]][[3]],alpha.plots.list[[3]][[3]],
+               alpha.plots.list[[1]][[4]],alpha.plots.list[[2]][[4]],alpha.plots.list[[3]][[4]],
+               alpha.plots.list[[1]][[5]],alpha.plots.list[[2]][[5]],alpha.plots.list[[3]][[5]],
+               alpha.plots.list[[1]][[6]],alpha.plots.list[[2]][[6]],alpha.plots.list[[3]][[6]],   
+               alpha.plots.list[[1]][[7]],alpha.plots.list[[2]][[7]],alpha.plots.list[[3]][[7]],
+               labels=labs,
+               ncol=6)
+# dev.off()
+
+pdf(paste0(WORKING.DIR,"/plots/SupFig5.pdf"),
+    height=11,
+    width=15,
+    onefile = F)
+egg::ggarrange(alpha.plots.list[[4]][[1]],alpha.plots.list[[5]][[2]],alpha.plots.list[[6]][[2]],
+               alpha.plots.list[[4]][[2]],alpha.plots.list[[5]][[2]],alpha.plots.list[[6]][[2]],
+               alpha.plots.list[[4]][[3]],alpha.plots.list[[5]][[3]],alpha.plots.list[[6]][[3]],
+               alpha.plots.list[[4]][[4]],alpha.plots.list[[5]][[4]],alpha.plots.list[[6]][[4]],
+               alpha.plots.list[[4]][[5]],alpha.plots.list[[5]][[5]],alpha.plots.list[[6]][[5]],
+               alpha.plots.list[[4]][[6]],alpha.plots.list[[5]][[6]],alpha.plots.list[[6]][[6]],   
+               alpha.plots.list[[4]][[7]],alpha.plots.list[[5]][[7]],alpha.plots.list[[6]][[7]],
+               labels=labs,
+               ncol=6)
+dev.off()
+```    
+
+
+```{r,fig.height=11,fig.width=15}
+labs <- for(x in 1:21){ifelse((x-1)%%3 != 0,LETTERS[[x]],"")}
+
+labs <- c()
+for (x in 1:21) { 
+  if((x-1)%%3 == 0) {
+    labs <- c(labs,LETTERS[[(x-1)/3+1]])
+  }else{
+    labs <- c(labs,"")
+  }
+}
+
+pdf(paste0(WORKING.DIR,"/plots/SupFig6.pdf"),
+    height=11,
+    width=15,
+    onefile = F)
+egg::ggarrange(beta.plots.list[[1]][[1]],beta.plots.list[[2]][[1]],beta.plots.list[[3]][[1]],
+               beta.plots.list[[1]][[2]],beta.plots.list[[2]][[2]],beta.plots.list[[3]][[2]],
+               beta.plots.list[[1]][[3]],beta.plots.list[[2]][[3]],beta.plots.list[[3]][[3]],
+               beta.plots.list[[1]][[4]],beta.plots.list[[2]][[4]],beta.plots.list[[3]][[4]],
+               beta.plots.list[[1]][[5]],beta.plots.list[[2]][[5]],beta.plots.list[[3]][[5]],
+               beta.plots.list[[1]][[6]],beta.plots.list[[2]][[6]],beta.plots.list[[3]][[6]],   
+               beta.plots.list[[1]][[7]],beta.plots.list[[2]][[7]],beta.plots.list[[3]][[7]],
+               labels=labs,
+               ncol=6)
+dev.off()
+        
+
+pdf(paste0(WORKING.DIR,"/plots/SupFig7.pdf"),
+    height=11,
+    width=15,
+    onefile = F)
+egg::ggarrange(beta.plots.list[[4]][[1]],beta.plots.list[[5]][[1]],beta.plots.list[[6]][[1]],
+               beta.plots.list[[4]][[2]],beta.plots.list[[5]][[2]],beta.plots.list[[6]][[2]],
+               beta.plots.list[[4]][[3]],beta.plots.list[[5]][[3]],beta.plots.list[[6]][[3]],
+               beta.plots.list[[4]][[4]],beta.plots.list[[5]][[4]],beta.plots.list[[6]][[4]],
+               beta.plots.list[[4]][[5]],beta.plots.list[[5]][[5]],beta.plots.list[[6]][[5]],
+               beta.plots.list[[4]][[6]],beta.plots.list[[5]][[6]],beta.plots.list[[6]][[6]],   
+               beta.plots.list[[4]][[7]],beta.plots.list[[5]][[7]],beta.plots.list[[6]][[7]],
+               labels=labs,
+               ncol=6)
+dev.off()
+        
+```

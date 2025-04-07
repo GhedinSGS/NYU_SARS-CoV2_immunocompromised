@@ -1,0 +1,791 @@
+# Preanalysis
+
+```{r}
+library(edgeR)
+library(igraph)
+library(NetCoMi)
+library(randomcoloR)
+library(RColorBrewer)
+
+WORKING.DIR="Z:/mchung/leopoldo_segal_07/"
+
+load(paste0(WORKING.DIR,"/upstream.R"))
+load(paste0(WORKING.DIR,"/de_analysis.R"))
+
+counts <- counts$Bracken
+annotation <- annotation$Bracken
+
+
+```
+
+
+```{r}
+# counts <- read.delim(paste0(WORKING.DIR,"/tables/counts.conqur.bracken.tsv"))
+counts <- apply(counts,2,function(x){as.numeric(as.character(x))})
+rownames(counts) <- annotation$taxa
+
+# metadata <- metadata[!is.na(metadata$imsupp),]
+
+relab <- as.data.frame(apply(counts,2,function(x){x/sum(x)*100}))
+```
+
+## Set single sample list
+
+```{r}
+one_sample_per_subject <- function(metadata,sample_types, week){
+  metadata <- metadata[metadata$sample_type %in% sample_types,]
+  metadata <- metadata[metadata$weekpostintub %in% week,]
+  metadata <- metadata[!duplicated(metadata$subject_id),]
+  return(metadata$Sample.ID)
+}
+
+# samples <- list("BAL_and_TA | Week 1" = one_sample_per_subject(metadata, c("BAL","TA"), week = c(1)),
+#                 "BAL_and_TA | Week 2" = one_sample_per_subject(metadata, c("BAL","TA"), week = c(2)),
+#                 "BAL_and_TA | Week 3" = one_sample_per_subject(metadata, c("BAL","TA"), week = c(3)),
+#                 "BAL_and_TA | Week 4" = one_sample_per_subject(metadata, c("BAL","TA"), week = c(4)),
+#                 "UA | Week 1" = one_sample_per_subject(metadata, c("UA"), week = c(1)),
+#                 "UA | Week 2" = one_sample_per_subject(metadata, c("UA"), week = c(2)),
+#                 "UA | Week 3" = one_sample_per_subject(metadata, c("UA"), week = c(3)),
+#                 "UA | Week 4" = one_sample_per_subject(metadata, c("UA"), week = c(4)))
+
+samples <- list("BAL_and_TA | Week 1" = one_sample_per_subject(metadata, c("BAL","TA"), week = c(1)),
+                "BAL_and_TA | Week 2" = one_sample_per_subject(metadata, c("BAL","TA"), week = c(2)),
+                "BAL_and_TA | Week 3+" = one_sample_per_subject(metadata, c("BAL","TA"), week = c(3,4)),
+                "UA | Week 1" = one_sample_per_subject(metadata, c("UA"), week = c(1)),
+                "UA | Week 2" = one_sample_per_subject(metadata, c("UA"), week = c(2)),
+                "UA | Week 3+" = one_sample_per_subject(metadata, c("UA"), week = c(3,4)))
+```
+
+### Get list of top taxa per sample type
+```{r}
+top_taxa <- list()
+for(i in 1:length(samples)){
+  sample_type <- gsub(" [|].*","",names(samples)[i])
+  
+  df <- counts[,samples[[i]]]
+  cpm <- cpm(DGEList(df))
+  logCPM <- cpm(cpm, log=TRUE, prior.count = 1)  
+  taxa <- rownames(df)[order(-rowMeans(logCPM))]
+  taxa <- taxa[taxa != "Equine infectious anemia virus"]
+  
+  kingdom <- annotation$superkingdom[match(taxa,annotation$taxa)]
+  subkingdom <- annotation$kingdom[match(taxa,annotation$taxa)]
+
+  top_taxa[[sample_type]] <- unique(c(top_taxa[[sample_type]],taxa[1:100]))
+}
+```
+
+# Run NetCoMi
+
+## Compare each week using top abundant taxa
+
+### Construct network for single covariates
+```{r}
+net_spring <- list()
+for(i in 1:length(samples)){
+  sample_type <- gsub(" [|].*","",names(samples)[i])
+
+  metadata.subset <- metadata[match(samples[[i]],metadata$Sample.ID),]
+  
+  # covariate <- "is_immunosuppressed"
+  # groups <- c("N","Y")
+  # df1 <- counts[,metadata.subset$Sample.ID[metadata.subset$is_immunosuppressed == groups[1]]]
+  # df2 <- counts[,metadata.subset$Sample.ID[metadata.subset$is_immunosuppressed == groups[2]]]
+  # 
+  covariate <- "dead_or_alive"
+  groups <- c("Alive","Dead")
+  df1 <- counts[,metadata.subset$Sample.ID[metadata.subset$dead_or_alive == groups[1]]]
+  df2 <- counts[,metadata.subset$Sample.ID[metadata.subset$dead_or_alive == groups[2]]]
+  
+  
+  df1 <- t(df1[top_taxa[[sample_type]],])
+  df2 <- t(df2[top_taxa[[sample_type]],])
+  
+  net_spring[[i]] <- netConstruct(data = df1, 
+                                  data2 = df2,  
+                                  # filtTaxPar = list(highestFreq = 50),
+                                  # filtSamp = "totalReads",
+                                  # filtSampPar = list(totalReads = 1000),
+                                  measure = "spring",
+                                  measurePar = list(nlambda=10, 
+                                                    rep.num=10),
+                                  normMethod = "clr", 
+                                  zeroMethod = "pseudoZO",
+                                  sparsMethod = "threshold", 
+                                  thresh = 0.3,
+                                  dissFunc = "signed",
+                                  verbose = 2,
+                                  seed = 123456)
+  print(i)
+}
+names(net_spring) <- names(samples)
+
+save(net_spring,
+     file=paste0(WORKING.DIR,"/netcomi.",covariate,".R"))
+```
+
+
+### Construct network for healthy/immunosuppressed subsets
+```{r}
+net_spring <- list()
+for(i in 4:length(samples)){
+  sample_type <- gsub(" [|].*","",names(samples)[i])
+
+  metadata.subset <- metadata[match(samples[[i]],metadata$Sample.ID),]
+  
+  imsupp <- "immunocompetent"
+  covariate <- "dead_or_alive"
+  groups <- c("Alive","Dead")
+  df1 <- counts[,metadata.subset$Sample.ID[metadata.subset$is_immunosuppressed == "N" & metadata.subset$dead_or_alive == groups[1]]]
+  df2 <- counts[,metadata.subset$Sample.ID[metadata.subset$is_immunosuppressed == "N" & metadata.subset$dead_or_alive == groups[2]]]
+  
+  # imsupp <- "immunocompromised"
+  # covariate <- "dead_or_alive"
+  # groups <- c("Alive","Dead")
+  # df1 <- counts[,metadata.subset$Sample.ID[metadata.subset$is_immunosuppressed == "Y" & metadata.subset$dead_or_alive == groups[1]]]
+  # df2 <- counts[,metadata.subset$Sample.ID[metadata.subset$is_immunosuppressed == "Y" & metadata.subset$dead_or_alive == groups[2]]]
+  
+  
+  df1 <- t(df1[top_taxa[[sample_type]],])
+  df2 <- t(df2[top_taxa[[sample_type]],])
+  
+  net_spring[[i]] <- netConstruct(data = df1, 
+                                  data2 = df2,  
+                                  # filtTaxPar = list(highestFreq = 50),
+                                  # filtSamp = "totalReads",
+                                  # filtSampPar = list(totalReads = 1000),
+                                  measure = "spring",
+                                  measurePar = list(nlambda=10, 
+                                                    rep.num=10),
+                                  normMethod = "clr", 
+                                  zeroMethod = "pseudoZO",
+                                  sparsMethod = "threshold", 
+                                  thresh = 0.3,
+                                  dissFunc = "signed",
+                                  verbose = 2,
+                                  seed = 123456)
+  print(i)
+}
+names(net_spring) <- names(samples)
+
+save(net_spring,
+     file=paste0(WORKING.DIR,"/netcomi.",imsupp,".",covariate,".R"))
+```
+
+## Plot comparison network using NetCoMi functions
+```{r, fig.height=20,fig.width=40}
+plot(net_spring[[i]]$assoMat1)
+p <- plot(props_net_spring, 
+          sameLayout = TRUE, 
+          layout="layout_with_kk",
+          layoutGroup = 1,
+          rmSingles = F, 
+          nodeColor = "cluster", 
+          nodeSize = "mclr",
+          repulsion = 5,
+          labelScale = FALSE,
+          cexLabels = 2,
+          nodeSizeSpread = 3,
+          cexNodes = 2,
+          hubBorderCol = "gray40",
+          title1 = "Network on OTU level with SPRING associations", 
+          groupNames = groups,
+          showTitle = TRUE,
+          cexTitle = 2.3)
+legend("bottom", title = "estimated association:", legend = c("+","-"), 
+       col = c("#009900","red"), inset = 0.02, cex = 4, lty = 1, lwd = 4, 
+       bty = "n", horiz = TRUE)
+```
+
+## Plot comparison networks with igraph
+```{r, fig.height=10,fig.width=20}
+covariate <- "dead_or_alive"
+covar.groups <- c("Alive","Dead")
+
+# covariate <- "is_immunosuppressed"
+# covar.groups <- c("Immunocompetent","Immunosuppressed")
+
+load(paste0(WORKING.DIR,"/netcomi.",covariate,".R"))
+
+select_nodes <- c("SARS-CoV2","Candida albicans","Proteus mirabilis",
+                  grep("Staphylococcus",top_taxa$BAL_and_TA,value=T),
+                  grep("Bacillus",top_taxa$BAL_and_TA,value=T),
+                  grep("Corynebacterium",top_taxa$BAL_and_TA,value=T),
+                  grep("Lactobacillus",top_taxa$BAL_and_TA,value=T),
+                  grep("Streptococcus",top_taxa$BAL_and_TA,value=T),
+                  grep("Prevotella",top_taxa$BAL_and_TA,value=T))
+for(i in 1:length(net_spring)){
+  diff_net_spring <- diffnet(net_spring[[i]],
+                             diffMethod = "fisherTest", 
+                             adjust = "none")
+
+  props_net_spring <- netAnalyze(net_spring[[i]], 
+                                 clustMethod = "cluster_fast_greedy",
+                                 weightDeg = TRUE,
+                                 normDeg = FALSE,
+                                 gcmHeat = FALSE)
+  
+  graphA <- igraph::graph_from_adjacency_matrix(net_spring[[i]]$adjaMat1, weighted = TRUE)
+  graphA <- simplify(graphA,remove.multiple = T, remove.loops = T)
+  set.seed(123456)
+  lay_fr <- igraph::layout_with_kk(graphA)
+  rownames(lay_fr) <- rownames(net_spring[[i]]$adjaMat1)
+  graphA <- as.undirected(graphA)
+  
+  graphB <- igraph::graph_from_adjacency_matrix(net_spring[[i]]$adjaMat2, weighted = TRUE)
+  graphB <- simplify(graphB,remove.multiple = T, remove.loops = T)
+  set.seed(123456)
+  # lay_fr <- igraph::layout_with_kk(graphB)
+  # rownames(lay_fr) <- rownames(net_spring[[i]]$adjaMat1)
+  graphB <- as.undirected(graphB)
+  
+  clusters <- c(paste0("clust1_",sort(unique(props_net_spring$clustering$clust1))),
+                paste0("clust2_",sort(unique(props_net_spring$clustering$clust2))))
+  set.seed(123456)
+  color <- distinctColorPalette(length(clusters))
+  for(j in 1:length(clusters)){
+    if(gsub("_.*","",clusters[j]) == "clust1"){
+      props_net_spring$clustering$clust1 <- ifelse(props_net_spring$clustering$clust1 == gsub(".*_","",clusters[j]),
+                                             color[j],
+                                             props_net_spring$clustering$clust1)
+    }else{
+      props_net_spring$clustering$clust2 <- ifelse(props_net_spring$clustering$clust2 == gsub(".*_","",clusters[j]),
+                                             color[j],
+                                             props_net_spring$clustering$clust2)
+    }
+  }
+  kingdom <- annotation$superkingdom[match(names(V(graphA)),annotation$taxa)] 
+
+  ends1 <- ends(graphA,es=E(graphA))
+  ends1$key <- ifelse(ends1[,2]>ends1[,1],paste0(ends1[,1],"--",ends1[,2]),paste0(ends1[,2],"--",ends1[,1]))
+  net_spring[[i]]$edgelist1$key <- ifelse(net_spring[[i]]$edgelist1$v2 > net_spring[[i]]$edgelist1$v1,
+                                          paste0(net_spring[[i]]$edgelist1$v1,"--",net_spring[[i]]$edgelist1$v2),
+                                          paste0(net_spring[[i]]$edgelist1$v2,"--",net_spring[[i]]$edgelist1$v1))
+  V(graphA)$color <- props_net_spring$clustering$clust1
+  V(graphA)$shape <- ifelse(kingdom == "Bacteria","circle","csquare")
+  V(graphA)$size <- log2(colMeans(net_spring[[i]]$normCounts1))
+  V(graphA)$size <- ifelse(V(graphA)$size > 1,V(graphA)$size,1)*0.8
+  E(graphA)$color <- ifelse(net_spring[[i]]$edgelist1$asso[match(ends1$key,net_spring[[i]]$edgelist1$key)] > 0,
+                            "gray60","indianred")
+  print(table(E(graphA)$color))
+  # E(graphA)$color <- "darkgrey"
+  E(graphA)$width <- abs(net_spring[[i]]$edgelist1$asso[match(ends1$key,net_spring[[i]]$edgelist1$key)])*20
+  
+  # V(graphA)$name <- ifelse(V(graphA)$name %in% props_net_spring$hubs$hubs1,V(graphA)$name,NA)
+  V(graphA)$name <- ifelse(V(graphA)$name %in% select_nodes,V(graphA)$name,NA)
+  V(graphA)$name <- ifelse(V(graphA)$name == "SARS-CoV2","SARS\nCoV2",substr(V(graphA)$name, start = 1, stop = 3))
+  
+  plot(graphA,
+     layout=lay_fr,
+     vertex.label.cex = V(graphA)$size*0.1,
+     vertex.label.color = "black",
+     vertex.label.family = "Helvetica",
+     main = covar.groups[1])
+  
+  pdf(paste0(WORKING.DIR,"/plots/NetCoMi/",gsub(" ","_",gsub(" [|] ","_",names(net_spring)[i])),
+             ".individual_week_comparison.",covariate,".selectlabels.pdf"),
+      height=10,
+      width=20)
+  # png(paste0(WORKING.DIR,"/plots/NetCoMi/",gsub(" ","_",gsub(" [|] ","_",names(net_spring)[i])),
+  #            ".individual_week_comparison.",covariate,".selectlabels.png"),
+  #     height=20,
+  #     width=40,
+  #     res = 300,
+  #     units = "in")
+  # 
+  print("test")
+  par(mfrow = c(1, 2))
+  plot(graphA,
+     layout=lay_fr,
+     vertex.label.cex = V(graphA)$size*0.1,
+     vertex.label.color = "black",
+     vertex.label.family = "Helvetica",
+     main = covar.groups[1])
+  
+  ends2 <- ends(graphB,es=E(graphB))
+  ends2$key <- ifelse(ends2[,2]>ends2[,1],paste0(ends2[,1],"--",ends2[,2]),paste0(ends2[,2],"--",ends2[,1]))
+  net_spring[[i]]$edgelist2$key <- ifelse(net_spring[[i]]$edgelist2$v2 > net_spring[[i]]$edgelist2$v1,
+                                          paste0(net_spring[[i]]$edgelist2$v1,"--",net_spring[[i]]$edgelist2$v2),
+                                          paste0(net_spring[[i]]$edgelist2$v2,"--",net_spring[[i]]$edgelist2$v1))
+  V(graphB)$color <- props_net_spring$clustering$clust2
+  V(graphB)$shape <- ifelse(kingdom == "Bacteria","circle","csquare")
+  V(graphB)$size <- log2(colMeans(net_spring[[i]]$normCounts2))
+  V(graphB)$size <- ifelse(V(graphB)$size > 1,V(graphB)$size,1)*0.8
+  E(graphB)$color <- ifelse(net_spring[[i]]$edgelist2$asso[match(ends2$key,net_spring[[i]]$edgelist2$key)] > 0,
+                            "gray60","indianred")
+  # E(graphB)$color <- "darkgrey"
+  print(table(E(graphB)$color))
+  E(graphB)$width <- abs(net_spring[[i]]$edgelist2$asso[match(ends2$key,net_spring[[i]]$edgelist2$key)])*20
+  
+  # V(graphB)$name <- ifelse(V(graphB)$name %in% props_net_spring$hubs$hubs1,V(graphB)$name,NA)
+  V(graphB)$name <- ifelse(V(graphB)$name %in% select_nodes,V(graphB)$name,NA)
+  V(graphB)$name <- ifelse(V(graphB)$name == "SARS-CoV2","SARS\nCoV2",substr(V(graphB)$name, start = 1, stop = 3))
+  
+  plot(graphB,
+     layout=lay_fr,
+     vertex.label.cex = V(graphB)$size*0.1,
+     vertex.label.color = "black",
+     vertex.label.family = "Helvetica",
+     main = covar.groups[2])
+
+
+  # for(j in 1:length(clusters)){
+  #   if(gsub("_.*","",clusters[j]) == "clust1"){
+  #     taxa <- names(props_net_spring$clustering$clust1)[props_net_spring$clustering$clust1 == color[j]]
+  #   }else{
+  #     taxa <- names(props_net_spring$clustering$clust2)[props_net_spring$clustering$clust2 == color[j]]
+  #   }
+  #   kingdom <- annotation$superkingdom[match(taxa,annotation$taxa)] 
+  #     
+  #   graphA.sub <- induced_subgraph(graphA, V(graphA)[taxa])
+  #   graphB.sub <- induced_subgraph(graphB, V(graphB)[taxa])
+  # 
+  #   ends1 <- ends(graphA.sub,es=E(graphA.sub))
+  #   ends1$key <- ifelse(ends1[,2]>ends1[,1],paste0(ends1[,1],"--",ends1[,2]),paste0(ends1[,2],"--",ends1[,1]))
+  # 
+  #   ends2 <- ends(graphB.sub,es=E(graphB.sub))
+  #   ends2$key <- ifelse(ends2[,2]>ends2[,1],paste0(ends2[,1],"--",ends2[,2]),paste0(ends2[,2],"--",ends2[,1]))
+  #   
+  #   V(graphA.sub)$color <- props_net_spring$clustering$clust1[taxa]
+  #   V(graphB.sub)$shape <- ifelse(kingdom == "Bacteria","circle","csquare")
+  #   V(graphA.sub)$size <- log2(colMeans(net_spring[[i]]$normCounts1[,taxa,drop=F]))
+  #   V(graphA.sub)$size <- ifelse(V(graphA.sub)$size > 1,V(graphA.sub)$size,1)
+  #   E(graphA.sub)$color <- ifelse(net_spring[[i]]$edgelist1$asso[match(ends1$key,net_spring[[i]]$edgelist1$key)] > 0,
+  #                                 "#006400","#ff3939")
+  #   E(graphA.sub)$width <- abs(net_spring[[i]]$edgelist1$asso[match(ends1$key,net_spring[[i]]$edgelist1$key)])*100
+  # 
+  #   par(mfrow = c(1, 2))
+  #   plot(graphA.sub,
+  #        layout=lay_fr[taxa,,drop=F],
+  #        vertex.label.cex = 2,
+  #        vertex.label.color = "black",
+  #        vertex.label.family = "Helvetica",
+  #        rmSingles = F,
+  #        main = groups[1])
+  #   
+  #   V(graphB.sub)$color <- props_net_spring$clustering$clust2[taxa]
+  #   V(graphB.sub)$shape <- ifelse(kingdom == "Bacteria","circle","csquare")
+  #   V(graphB.sub)$size <- log2(colMeans(net_spring[[i]]$normCounts2[,taxa,drop=F]))
+  #   V(graphB.sub)$size <- ifelse(V(graphB.sub)$size > 1,V(graphB.sub)$size,1)
+  #   E(graphB.sub)$color <- ifelse(net_spring[[i]]$edgelist2$asso[match(ends2$key,net_spring[[i]]$edgelist2$key)] > 0,
+  #                                 "#006400","#ff3939")
+  #   E(graphB.sub)$width <- abs(net_spring[[i]]$edgelist2$asso[match(ends2$key,net_spring[[i]]$edgelist2$key)])*100
+  # 
+  #   plot(graphB.sub,
+  #        layout=lay_fr[taxa,,drop=F],
+  #        vertex.label.cex = 2,
+  #        vertex.label.color = "black",
+  #        vertex.label.family = "Helvetica",
+  #        rmSingles = F,
+  #        main=groups[2])
+  # }
+  print("test2")
+  dev.off()
+}
+```
+
+```{r,fig.height=10,fig.width=20}
+par(mfrow = c(1, 2))
+
+plot(graphA,
+     labelScale = T,
+      posCol = "darkturquoise", 
+     negCol = "orange",
+     edgeTranspLow = 0,
+     edgeTranspHigh = 40,
+     layout=lay_fr,
+     # vertex.label.cex = 2,
+     # vertex.label.color = "black",
+     # vertex.label.family = "Helvetica",
+     rmSingles = F,
+     main = covar.groups[1])
+
+V(graphA)$color <- props_net_spring$clustering$clust1
+V(graphA)$shape <- ifelse(kingdom == "Bacteria","circle","csquare")
+V(graphA)$size <- log2(colMeans(net_spring[[i]]$normCounts1))
+V(graphA)$size <- ifelse(V(graphA)$size > 1,V(graphA)$size,1)*0.8
+E(graphA)$color <- ifelse(net_spring[[i]]$edgelist1$asso[match(ends1$key,net_spring[[i]]$edgelist1$key)] > 0,
+                          "#0d4c00","#9d3c84")
+E(graphA)$color <- "darkgrey"
+E(graphA)$width <- abs(net_spring[[i]]$edgelist1$asso[match(ends1$key,net_spring[[i]]$edgelist1$key)])*20
+
+# V(graphA)$name <- ifelse(V(graphA)$name %in% props_net_spring$hubs$hubs1,V(graphA)$name,NA)
+V(graphA)$name <- ifelse(V(graphA)$name %in% select_nodes,V(graphA)$name,NA)
+V(graphA)$name <- ifelse(V(graphA)$name == "SARS-CoV2","SARS-CoV2",substr(V(graphA)$name, start = 1, stop = 3))
+  
+plot(graphA,
+     layout=lay_fr,
+     vertex.label.cex = V(graphA)$size*0.1,
+     vertex.label.color = "black",
+     vertex.label.family = "Helvetica")
+```
+
+
+## Plot delta node degree and betweeness
+
+### Calculate betweenness node degree
+```{r,fig.height=6,fig.width=15}
+plot.df <- as.data.frame(matrix(nrow=0,
+                                ncol=3))
+
+plot.list <- list()
+
+for(i in 1:length(net_spring)){
+  g1 <- igraph::graph_from_adjacency_matrix(net_spring[[i]]$adjaMat1, weighted = TRUE)
+  g2 <- igraph::graph_from_adjacency_matrix(net_spring[[i]]$adjaMat2, weighted = TRUE)
+
+  names <- V(g1)$name
+  delta <- betweenness(g2) - betweenness(g1)
+  
+  plot.df <- as.data.frame(cbind(names,delta))
+  
+  plot.df$delta <- as.numeric(as.character(delta))
+  
+  top <- plot.df$names[order(-plot.df$delta)][1:15]
+  bottom <- rev(plot.df$names[order(plot.df$delta)][1:15])
+  
+  plot.df <- plot.df[plot.df$names %in% c(top,bottom),]
+  plot.df$names <- factor(plot.df$names,levels=rev(c(top,bottom)))
+  
+  plot.list[[i]] <- ggplot(plot.df,aes(x=delta,y=names,fill=delta))+
+    geom_hline(yintercept = 15.5,lty="dashed",color="darkgrey")+
+    geom_vline(xintercept = 0,lty="dashed")+
+    geom_bar(stat="identity")+
+    scale_fill_gradient2(low="blue",high="red")+
+    labs(title=names(samples)[i],
+         x="delta immunosuppressed-healthy node betweenness")+
+    theme_bw()+
+    theme(axis.title.y = element_blank())
+}
+
+egg::ggarrange(plot.list[[1]]+
+                 theme(axis.title.x = element_blank()),
+               plot.list[[2]],
+               plot.list[[3]]+
+                 theme(axis.title.x = element_blank()),
+               nrow=1)
+```
+
+### Calculate delta node degree
+```{r,fig.height=6,fig.width=15}
+plot.df <- as.data.frame(matrix(nrow=0,
+                                ncol=3))
+
+plot.list <- list()
+
+for(i in 1:length(net_spring)){
+  g1 <- igraph::graph_from_adjacency_matrix(net_spring[[i]]$adjaMat1, weighted = TRUE)
+  g2 <- igraph::graph_from_adjacency_matrix(net_spring[[i]]$adjaMat2, weighted = TRUE)
+
+  names <- V(g1)$name
+  delta <- degree(g2) - degree(g1)
+  
+  plot.df <- as.data.frame(cbind(names,delta))
+  
+  plot.df$delta <- as.numeric(as.character(delta))
+  
+  top <- plot.df$names[order(-plot.df$delta)][1:15]
+  bottom <- rev(plot.df$names[order(plot.df$delta)][1:15])
+  
+  plot.df <- plot.df[plot.df$names %in% c(top,bottom),]
+  plot.df$names <- factor(plot.df$names,levels=rev(c(top,bottom)))
+  
+  plot.list[[i]] <- ggplot(plot.df,aes(x=delta,y=names,fill=delta))+
+    geom_hline(yintercept = 15.5,lty="dashed",color="darkgrey")+
+    geom_vline(xintercept = 0,lty="dashed")+
+    geom_bar(stat="identity")+
+    scale_fill_gradient2(low="blue",high="red")+
+    labs(title=names(samples)[i],
+         x="delta immunosuppressed-healthy node degree")+
+    theme_bw()+
+    theme(axis.title.y = element_blank())
+}
+
+egg::ggarrange(plot.list[[1]]+
+                 theme(axis.title.x = element_blank()),
+               plot.list[[2]],
+               plot.list[[3]]+
+                 theme(axis.title.x = element_blank()),
+               nrow=1)
+```
+
+## Conduct network attack based analyses
+
+### Load NetCoMi object
+```{r}
+# covariate <- "dead_or_alive"
+# covar.groups <- c("Alive","Dead")
+
+covariate <- "is_immunosuppressed"
+covar.groups <- c("Immunocompetent","Immunosuppressed")
+
+load(paste0(WORKING.DIR,"/netcomi.",covariate,".R"))
+```
+
+
+### Betweenness-based attacks
+```{r}
+plot.df <- as.data.frame(matrix(nrow=0,
+                                ncol=3))
+
+for(i in 1:length(net_spring)){
+  g <- igraph::graph_from_adjacency_matrix(net_spring[[i]]$adjaMat1, weighted = TRUE)
+  components <- igraph::clusters(g, mode="weak")
+  print(max(components$csize))
+  
+  nodes <- length(V(g)$name)
+  comp_size <- max(components$csize)
+    
+  while(length(V(g)$name) > 5){
+    set.seed(123)
+    g <- delete.vertices(g, V(g)$name == names(sort(-betweenness(g)))[1])
+    components <- igraph::clusters(g, mode="weak")
+    
+    nodes <- c(nodes,length(V(g)$name))
+    comp_size <- c(comp_size,max(components$csize))
+  }
+  
+  sample <- rep(paste0(names(net_spring)[i]," | ",covar.groups[1]),length(nodes))
+
+  nodes <- (nodes[1]-nodes)/nodes[1]
+  comp_size <- comp_size/comp_size[1]
+  
+  plot.df <- as.data.frame(rbind(plot.df,
+                                 cbind(sample,
+                                       nodes,
+                                       comp_size)))
+  #### 
+  g <- igraph::graph_from_adjacency_matrix(net_spring[[i]]$adjaMat2, weighted = TRUE)
+  components <- igraph::clusters(g, mode="weak")
+  print(max(components$csize))
+  
+  nodes <- length(V(g)$name)
+  comp_size <- max(components$csize)
+    
+  while(length(V(g)$name) > 5){
+    set.seed(123)
+    g <- delete.vertices(g, V(g)$name == names(sort(-betweenness(g)))[1])
+    components <- igraph::clusters(g, mode="weak")
+    
+    nodes <- c(nodes,length(V(g)$name))
+    comp_size <- c(comp_size,max(components$csize))
+  }
+  
+  sample <- rep(paste0(names(net_spring)[i]," | ",covar.groups[2]),length(nodes))
+
+  nodes <- (nodes[1]-nodes)/nodes[1]
+  comp_size <- comp_size/comp_size[1]
+  
+  plot.df <- as.data.frame(rbind(plot.df,
+                                 cbind(sample,
+                                       nodes,
+                                       comp_size)))
+}
+
+plot.df$nodes <- as.numeric(as.character(plot.df$nodes))
+plot.df$comp_size <- as.numeric(as.character(plot.df$comp_size))
+
+plot.df <- plot.df[!grepl("UA",plot.df$sample),]
+# plot.df <- plot.df[grepl("UA",plot.df$sample),]
+
+p1 <- ggplot(plot.df,aes(x=nodes,y=comp_size,color=sample))+
+  geom_line(size=1)+
+  labs(title="Betweenness-based attack",
+       x="percentage of nodes removed",
+       y="size of largest component",
+       color="Network")+
+  theme_bw()
+```
+
+
+### Degree-based attacks
+```{r}
+plot.df <- as.data.frame(matrix(nrow=0,
+                                ncol=3))
+
+for(i in 1:length(net_spring)){
+  g <- igraph::graph_from_adjacency_matrix(net_spring[[i]]$adjaMat1, weighted = TRUE)
+  components <- igraph::clusters(g, mode="weak")
+  print(max(components$csize))
+  
+  nodes <- length(V(g)$name)
+  comp_size <- max(components$csize)
+    
+  while(length(V(g)$name) > 5){
+    set.seed(123)
+    g <- delete.vertices(g, V(g)$name == names(sort(-degree(g)))[1])
+    components <- igraph::clusters(g, mode="weak")
+    
+    nodes <- c(nodes,length(V(g)$name))
+    comp_size <- c(comp_size,max(components$csize))
+  }
+  
+  sample <- rep(paste0(names(net_spring)[i]," | ",covar.groups[1]),length(nodes))
+  
+  nodes <- (nodes[1]-nodes)/nodes[1]
+  comp_size <- comp_size/comp_size[1]
+  
+  plot.df <- as.data.frame(rbind(plot.df,
+                                 cbind(sample,
+                                       nodes,
+                                       comp_size)))
+  #### 
+  g <- igraph::graph_from_adjacency_matrix(net_spring[[i]]$adjaMat2, weighted = TRUE)
+  components <- igraph::clusters(g, mode="weak")
+  print(max(components$csize))
+  
+  nodes <- length(V(g)$name)
+  comp_size <- max(components$csize)
+    
+  while(length(V(g)$name) > 5){
+    set.seed(123)
+    g <- delete.vertices(g, V(g)$name == names(sort(-degree(g)))[1])
+    components <- igraph::clusters(g, mode="weak")
+    
+    nodes <- c(nodes,length(V(g)$name))
+    comp_size <- c(comp_size,max(components$csize))
+  }
+  
+  sample <- rep(paste0(names(net_spring)[i]," | ",covar.groups[2]),length(nodes))
+    
+  nodes <- (nodes[1]-nodes)/nodes[1]
+  comp_size <- comp_size/comp_size[1]
+  
+  plot.df <- as.data.frame(rbind(plot.df,
+                                 cbind(sample,
+                                       nodes,
+                                       comp_size)))
+}
+
+plot.df$nodes <- as.numeric(as.character(plot.df$nodes))
+plot.df$comp_size <- as.numeric(as.character(plot.df$comp_size))
+
+plot.df <- plot.df[!grepl("UA",plot.df$sample),]
+# plot.df <- plot.df[grepl("UA",plot.df$sample),]
+
+p2 <- ggplot(plot.df,aes(x=nodes,y=comp_size,color=sample))+
+  geom_line(size=1)+
+  labs(title="Degree-based attack",
+       x="percentage of nodes removed",
+       y="size of largest component",
+       color="Network")+
+  theme_bw()
+```
+
+### Randomness-based attacks
+```{r}
+plot.df <- as.data.frame(matrix(nrow=0,
+                                ncol=3))
+
+for(i in 1:length(net_spring)){
+  g <- igraph::graph_from_adjacency_matrix(net_spring[[i]]$adjaMat1, weighted = TRUE)
+  components <- igraph::clusters(g, mode="weak")
+  print(max(components$csize))
+  
+  nodes <- length(V(g)$name)
+  comp_size <- max(components$csize)
+    
+  while(length(V(g)$name) > 5){
+    set.seed(123)
+    g <- delete.vertices(g, V(g)$name[sample(1:length(V(g)$name), 1)])
+    components <- igraph::clusters(g, mode="weak")
+    
+    nodes <- c(nodes,length(V(g)$name))
+    comp_size <- c(comp_size,max(components$csize))
+  }
+  
+  sample <- rep(paste0(names(net_spring)[i]," | ",covar.groups[1]),length(nodes))
+  
+  nodes <- (nodes[1]-nodes)/nodes[1]
+  comp_size <- comp_size/comp_size[1]
+  
+  plot.df <- as.data.frame(rbind(plot.df,
+                                 cbind(sample,
+                                       nodes,
+                                       comp_size)))
+  #### 
+  g <- igraph::graph_from_adjacency_matrix(net_spring[[i]]$adjaMat2, weighted = TRUE)
+  components <- igraph::clusters(g, mode="weak")
+  print(max(components$csize))
+  
+  nodes <- length(V(g)$name)
+  comp_size <- max(components$csize)
+    
+  while(length(V(g)$name) > 5){
+    set.seed(123)
+    g <- delete.vertices(g, V(g)$name[sample(1:length(V(g)$name), 1)])
+    components <- igraph::clusters(g, mode="weak")
+    
+    nodes <- c(nodes,length(V(g)$name))
+    comp_size <- c(comp_size,max(components$csize))
+  }
+  
+  sample <- rep(paste0(names(net_spring)[i]," | ",covar.groups[2]),length(nodes))
+    
+  nodes <- (nodes[1]-nodes)/nodes[1]
+  comp_size <- comp_size/comp_size[1]
+  
+  plot.df <- as.data.frame(rbind(plot.df,
+                                 cbind(sample,
+                                       nodes,
+                                       comp_size)))
+}
+
+plot.df$nodes <- as.numeric(as.character(plot.df$nodes))
+plot.df$comp_size <- as.numeric(as.character(plot.df$comp_size))
+
+plot.df <- plot.df[!grepl("UA",plot.df$sample),]
+# plot.df <- plot.df[grepl("UA",plot.df$sample),]
+
+p3 <- ggplot(plot.df,aes(x=nodes,y=comp_size,color=sample))+
+  geom_line(size=1)+
+  labs(title="Randomness-based attack",
+       x="percentage of nodes removed",
+       y="size of largest component",
+       color="Network")+
+  theme_bw()
+```
+
+### Plot attack-based plots
+
+```{r}
+p4 <- p1
+p5 <- p2
+p6 <- p3
+
+```
+
+```{r,fig.height=6,fig.width=12}
+egg::ggarrange(p1+
+                 guides(color='none'),
+               p2+
+                 guides(color='none'),
+               p3,
+               p4+
+                 guides(color='none'),
+               p5+
+                 guides(color='none'),
+               p6,
+               labels=c("A","","","B","",""),
+               nrow=2)sss
+
+pdf(paste0(WORKING.DIR,"/plots/Fig6.pdf"),
+    height=6,
+    width=12,
+    onefile = F)
+egg::ggarrange(p1+
+                 guides(color='none'),
+               p2+
+                 guides(color='none'),
+               p3,
+               p4+
+                 guides(color='none'),
+               p5+
+                 guides(color='none'),
+               p6,
+               labels=c("A","","","B","",""),
+               nrow=2)
+dev.off()
+```
+
+

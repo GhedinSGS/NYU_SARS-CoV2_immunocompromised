@@ -1,0 +1,342 @@
+
+# Mupi analysis
+
+## Load counts
+```{r}
+library(edgeR)
+library(ggplot2)
+library(ggrepel)
+
+load("Z:/mchung/leopoldo_segal_07/upstream.R")
+load("X:/mchung/leopoldo_segal_07/mupi_upstream.R")
+
+metadata <- metadata[match(colnames(counts.mupi),metadata$Sample.ID),]
+```
+
+
+## Set single sample list
+
+```{r}
+one_sample_per_subject <- function(metadata,sample_types, week){
+  metadata <- metadata[metadata$sample_type %in% sample_types,]
+  metadata <- metadata[metadata$weekpostintub %in% week,]
+  metadata <- metadata[!duplicated(metadata$subject_id),]
+  return(metadata$Sample.ID)
+}
+
+# samples <- list("BAL_and_TA | Week 1" = one_sample_per_subject(metadata, c("BAL","TA"), week = c(1)),
+#                 "BAL_and_TA | Week 2" = one_sample_per_subject(metadata, c("BAL","TA"), week = c(2)),
+#                 "BAL_and_TA | Week 3" = one_sample_per_subject(metadata, c("BAL","TA"), week = c(3)),
+#                 "BAL_and_TA | Week 4" = one_sample_per_subject(metadata, c("BAL","TA"), week = c(4)),
+#                 "UA | Week 1" = one_sample_per_subject(metadata, c("UA"), week = c(1)),
+#                 "UA | Week 2" = one_sample_per_subject(metadata, c("UA"), week = c(2)),
+#                 "UA | Week 3" = one_sample_per_subject(metadata, c("UA"), week = c(3)),
+#                 "UA | Week 4" = one_sample_per_subject(metadata, c("UA"), week = c(4)))
+
+samples <- list("BAL_and_TA | Week 1" = one_sample_per_subject(metadata, c("BAL","TA"), week = c(1)),
+                "BAL_and_TA | Week 2" = one_sample_per_subject(metadata, c("BAL","TA"), week = c(2)),
+                "BAL_and_TA | Week 3+" = one_sample_per_subject(metadata, c("BAL","TA"), week = c(3,4)),
+                "UA | Week 1" = one_sample_per_subject(metadata, c("UA"), week = c(1)),
+                "UA | Week 2" = one_sample_per_subject(metadata, c("UA"), week = c(2)),
+                "UA | Week 3+" = one_sample_per_subject(metadata, c("UA"), week = c(3,4)))
+```
+
+# Diversity analyses
+
+## Run MDS
+
+```{r}
+mds <- list()
+
+for(i in 1:3){
+  sample_type <- gsub(" [|].*","",names(samples)[i])
+  
+  metadata.subset <- metadata[metadata$Sample.ID %in% samples[[i]],]
+
+  counts.subset <- counts.mupi[,metadata.subset$Sample.ID]
+  
+  groups <- factor(metadata.subset$is_immunosuppressed, levels=c("N","Y"))
+  # groups <- factor(metadata.subset$dead_or_alive, levels=c("Alive","Dead"))
+
+  design <- model.matrix(~groups)
+
+  colData <- as.data.frame(cbind(groups))
+  rownames(colData) <- colnames(counts.subset)
+  colnames(colData) <- c("groups")
+  
+  ddsv <- DESeqDataSetFromMatrix(countData = round(counts.subset),
+                                 colData = colData,
+                                 design = design)
+  idx <- which(colSums(counts(ddsv)) == 0)
+  if(length(idx) > 0){ddsv <- ddsv[ , -idx]}
+  
+  gm_mean = function(x, na.rm=TRUE){ exp(sum(log(x[x > 0]), na.rm=na.rm) / length(x))}
+  geoMeans = apply(counts(ddsv), 1, gm_mean)
+  
+  ddsv <- estimateSizeFactors(ddsv, geoMeans = geoMeans)
+  vsdv <- varianceStabilizingTransformation(ddsv)
+  vsdv0 <- ifelse(assay(vsdv)<0,0,assay(vsdv))
+  
+  vegdist <- vegdist(as.data.frame(t(vsdv0)),method="bray")
+  cmdScale <- cmdscale(vegdist, k=ifelse(ncol(counts.subset) <= 10,ncol(counts.subset)-1,10))
+  vars <- apply(cmdScale, 2, var)
+  percentVar <- round(100 * (vars/sum(vars)))
+  
+  mds[[i]] <- list()
+  mds[[i]]$vsdv <- vsdv
+  mds[[i]]$vegdist <- vegdist
+  mds[[i]]$cmdScale <- cmdScale
+  mds[[i]]$vars <- vars
+  mds[[i]]$percentVar <- percentVar
+}
+
+names(mds) <- names(samples)[1:3]
+```
+
+### Alpha diversity
+
+```{r,fig.height=6,fig.width=11}
+alpha.plots.list <- list()
+adonis_categories <- "is_immunosuppressed"
+for(i in 1:length(mds)){
+  metadata.subset <- metadata[match(samples[[i]],metadata$Sample.ID),]
+
+  alpha.plots.list[[i]] <- list()
+  data_shannon <- diversity(t(counts.mupi[,metadata.subset$Sample.ID]), index = "shannon") 
+
+  for(j in 1:length(adonis_categories)){
+    groups <- metadata.subset[,adonis_categories[j]]
+  
+    plot.df <- as.data.frame(cbind(groups,data_shannon))
+    colnames(plot.df) <- c("group","shannon")
+    plot.df$shannon <- as.numeric(as.character(plot.df$shannon))
+    
+    kw <- kruskal.test(shannon ~ group, data = plot.df)
+    
+    alpha.plots.list[[i]][[j]] <- ggplot(plot.df,aes(x=group,y=shannon,fill=group))+
+      geom_boxplot(outlier.shape = NA)+
+      geom_jitter(width = .05)+
+      guides(fill="none")+
+      #stat_compare_means(method = "kruskal.test")+
+      labs(title=paste0(names(samples)[i],"\n",adonis_categories[j],"\np = ",round(kw$p.value,2)))+
+      theme_bw()+
+      theme(plot.title = element_text(size=8),
+            axis.title.x = element_blank())+
+      scale_fill_manual(values = c("black","red"))
+  }
+}
+
+
+```
+
+```{r,fig.height=11,fig.width=6}
+beta.plots.list <- list()
+
+for(i in 1:length(mds)){
+  metadata.subset <- metadata[match(samples[[i]],metadata$Sample.ID),]
+
+  beta.plots.list[[i]] <- list()
+  for(j in 1:length(adonis_categories)){
+    groups <- metadata.subset[,adonis_categories[j]]
+    
+    newResults <- as.data.frame(cbind(mds[[i]]$cmdScale,
+                                      as.character(groups)))
+    colnames(newResults)[1] <- "PC1"
+    colnames(newResults)[2] <- "PC2"
+    colnames(newResults)[ncol(newResults)] <- "groups"
+  
+    centroids <- aggregate(cbind(as.numeric(as.character(PC1)),
+                                 as.numeric(as.character(PC2))) ~ groups,
+                           data= newResults, mean)
+    colnames(centroids) <- c("groups","PC1","PC2")
+    newResults <- merge(newResults,centroids,by="groups",suffixes=c("",".centroid"))
+  
+    for(k in 2:ncol(newResults)){newResults[,k] <- as.numeric(as.character(newResults[,k]))}
+    newResults$labels <- rownames(mds[[i]]$cmdScale)
+  
+    newResults <- as.data.frame(newResults)
+  
+    data.adonis <- data.frame(colData(mds[[i]]$vsdv))
+    data.adonis$groups <- groups
+    
+    samplepermanova <- adonis2(mds[[i]]$vegdist ~ groups)
+    # samplepermanova <- as.data.frame(samplepermanova$aov.tab)
+    samplepermanova <- samplepermanova$'Pr(>F)'[1]
+
+    beta.plots.list[[i]][[j]] <- ggplot() + # Graph PC1 and PC2
+      geom_segment(aes(x=!!newResults$PC1.centroid, y=!!newResults$PC2.centroid,
+                       xend=!!newResults$PC1, yend=!!newResults$PC2, color=!!newResults$groups),
+                   alpha=0.8)+
+      geom_point(aes(x=!!newResults$PC1, y=!!newResults$PC2,
+                     color=!!newResults$groups),
+                 size=2,alpha=0.5)+
+      geom_label_repel(aes(x=!!centroids$PC1, y=!!centroids$PC2, 
+                           label=!!centroids$groups,color=!!centroids$groups), size=3,alpha=0.8)+
+      labs(title=paste0(names(samples)[i],"\n",adonis_categories[j],"\nPr(>F) = ",samplepermanova),
+           x=paste0("PC1: ",percentVar[1],"% variance"),
+           y=paste0("PC2: ",percentVar[2],"% variance"),
+           color=names(samples)[i])+
+      guides(color="none")+
+      theme_bw()+
+      theme(plot.title = element_text(size=8))+
+      scale_color_manual(values = c("black","red"))
+  }
+}
+egg::ggarrange(alpha.plots.list[[1]][[1]],beta.plots.list[[1]][[1]],
+               alpha.plots.list[[2]][[1]],beta.plots.list[[2]][[1]],
+               alpha.plots.list[[3]][[1]],beta.plots.list[[3]][[1]],
+               widths = c(2,3),
+               nrow=3)
+```
+
+## Run edgeR
+
+### Comparing Healthy v. Immunosuppressed
+
+```{r}
+edgeR.output <- list()
+for(i in 1:length(samples)){
+  sample_type <- gsub(" [|].*","",names(samples)[i])
+
+  counts.subset <- counts.mupi[,samples[[i]]]
+  counts.subset <- counts.subset[,colSums(counts.subset) >= 1000]
+  metadata.subset <- metadata[match(colnames(counts.subset),metadata$Sample.ID),]
+  
+  imsupp <- factor(metadata.subset$is_immunosuppressed, levels=c("N","Y"))
+  print(table(imsupp))
+  #weekpostintub <- ifelse(metadata.subset$weekpostintub >= 4,3,metadata.subset$weekpostintub)
+  # run <- metadata.subset$run
+  
+  design <- model.matrix(~imsupp)
+  # design <- model.matrix(~imsupp + run)
+  
+  y <- DGEList(counts=counts.subset,
+               group=imsupp)
+  keep <- filterByExpr(y)  
+  y <- y[keep, , keep.lib.sizes = F]
+  y <- calcNormFactors(y, method="TMM")
+  y <- estimateDisp(y,design, robust=TRUE)
+  fit <- glmQLFit(y,design,robust=TRUE)
+    
+  # qlf <- glmQLFTest(fit,coef=2:length(unique(groups)))
+  qlf <- glmQLFTest(fit,coef=2)
+  de <- topTags(qlf,n=Inf)$table
+  edgeR.output[[i]] <- de
+  
+  # print(length(rownames(edgeR.output[[i]])[edgeR.output[[i]]$FDR < 0.05 & !is.na(edgeR.output[[i]]$FDR)]))
+  print(length(rownames(edgeR.output[[i]])[edgeR.output[[i]]$PValue < 0.05 & !is.na(edgeR.output[[i]]$FDR)]))
+  print(rownames(edgeR.output[[i]])[edgeR.output[[i]]$PValue < 0.05 & !is.na(edgeR.output[[i]]$FDR)])
+}
+names(edgeR.output) <- names(samples)
+edgeR.imsupp <- edgeR.output
+```
+
+```{r}
+relab <- apply(counts.mupi,2,function(x){x/sum(x)*100})
+
+# top_taxa <- rownames(log2cpm)[order(-rowMedians(log2cpm))][1:10]
+top_taxa <- rownames(relab)[order(-rowMedians(relab))][1:20]
+
+p <- list()
+for(i in 1:3){
+  sample_type <- gsub(" [|].*","",names(samples)[i])
+
+  counts.subset <- counts.mupi[,samples[[i]]]
+  counts.subset <- counts.subset[,colSums(counts.subset) >= 1000]
+  relab.subset <- apply(counts.subset,2,function(x){x/sum(x)*100})
+
+  metadata.subset <- metadata[match(colnames(counts.subset),metadata$Sample.ID),]
+  
+  imsupp <- factor(metadata.subset$is_immunosuppressed, levels=c("N","Y"))
+  print(table(imsupp))
+  
+  y <- DGEList(counts=counts.subset,
+               group=imsupp)
+  keep <- filterByExpr(y)  
+  y <- y[keep, , keep.lib.sizes = F]
+  y <- calcNormFactors(y, method="TMM")
+  log2cpm = cpm(y, log=T, prior.count=1)
+  
+  # df <- reshape2::melt(log2cpm[top_taxa,])
+  # colnames(df) <- c("taxa","sample","log2cpm")
+  
+  df <- reshape2::melt(relab.subset[top_taxa,])
+  colnames(df) <- c("taxa","sample","relab")
+  
+  df$taxa <- factor(df$taxa,levels=rev(top_taxa))
+  df$imsupp <- factor(metadata.subset$is_immunosuppressed[match(df$sample,metadata.subset$Sample.ID)], levels=c("N","Y"))
+  
+  p[[i]] <- ggplot(df,aes(x=relab,y=taxa,fill=imsupp))+
+    geom_boxplot()+
+    #geom_point()+
+    guides(fill="none")+
+    # facet_wrap(imsupp~.)+
+    theme_bw()+
+    theme(axis.title.y=element_blank())
+  
+  plot(p[[i]])
+
+}
+
+```
+
+```{r,fig.height=7,fig.width=13}
+n<-10
+relab <- apply(counts.mupi,2,function(x){x/sum(x)*100})
+top_taxa <- rownames(relab)[order(-rowMedians(relab))][1:n]
+
+df <- as.data.frame(counts.mupi)
+df["Other",] <- as.vector(colSums(df[!(rownames(df) %in% top_taxa),]))
+df <- df[c(top_taxa,"Other"),]
+relab <- apply(df,2,function(x){x/sum(x)*100})
+
+df <- reshape2::melt(as.matrix(relab))
+colnames(df) <- c("taxa","sample","relab")
+df$imsupp <- factor(metadata$is_immunosuppressed[match(df$sample,metadata$Sample.ID)], levels=c("N","Y"))
+df$week <- metadata$weekpostintub[match(df$sample,metadata$Sample.ID)]
+df$week <- factor(ifelse(df$week>3,3,df$week),levels=c(1,2,3))
+
+df <- df[order(df$week,df$imsupp),]
+df$sample <- factor(df$sample,levels=unique(df$sample))
+
+set.seed(80)
+fill_col <- c(randomcoloR::distinctColorPalette(n),"darkgrey")
+p2 <- ggplot(df,aes(x=sample,y=relab,fill=taxa,color=imsupp))+
+  geom_bar(stat="identity")+
+  facet_grid(~week, scales = "free_x",space="free_x")+
+  guides(color="none")+
+  labs(y="relative abundnace",fill="Taxa")+
+  scale_y_continuous(expand=c(0,0))+
+  scale_color_manual(values=c("black","red"))+
+  scale_fill_manual(values=fill_col)+
+  theme_bw()+
+  theme(axis.text.x = element_text(size=8,angle = 90, vjust = 0.5, hjust=1),
+        axis.title.x = element_blank())
+
+
+df <- as.data.frame(cbind(colnames(counts.mupi),
+                          colSums(counts.mupi)))
+rownames(df) <- NULL
+colnames(df) <- c("sample","counts")
+df$counts <- as.numeric(as.character(df$counts))
+df$imsupp <- factor(metadata$is_immunosuppressed[match(df$sample,metadata$Sample.ID)], levels=c("N","Y"))
+df$week <- metadata$weekpostintub[match(df$sample,metadata$Sample.ID)]
+df$week <- factor(ifelse(df$week>3,3,df$week),levels=c(1,2,3))
+
+df <- df[order(df$week,df$imsupp),]
+df$sample <- factor(df$sample,levels=unique(df$sample))
+
+p1 <- ggplot(df,aes(x=sample,y=counts,fill=imsupp))+
+  geom_bar(stat="identity")+
+  facet_grid(~week, scales = "free_x",space="free_x")+
+  guides(color="none")+
+  labs(fill="Group")+
+  scale_fill_manual(values=c("black","red"))+
+  theme_bw()+
+  theme(axis.text.x = element_blank(),
+        axis.title.x = element_blank())
+
+egg::ggarrange(p1,p2,nrow=2,
+               labels=LETTERS[1:2],
+               heights = c(2,5))
+```

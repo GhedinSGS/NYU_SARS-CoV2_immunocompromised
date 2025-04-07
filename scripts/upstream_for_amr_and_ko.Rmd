@@ -1,0 +1,69 @@
+# Preanalysis
+
+## Set inputs
+```{r, results='hide'}
+library(ConQuR)
+library(doParallel)
+library(dplyr)
+
+WORKING.DIR="X:/mchung/leopoldo_segal_07/"
+```
+
+## Load R objects
+```{r}
+load("Z:/mchung/leopoldo_segal_07/upstream.R")
+source("Z:/mchung/pipelines/SGSlab_metagenomics/scripts/cluster_functions.R")
+```
+
+```{r}
+counts.ko <- list()
+
+files <- list.files(paste0(WORKING.DIR,"/pipeline_output22/tables/"),
+                    full.names = T)
+files <- files[grep("counts",files)]
+files <- files[!grepl("bracken",files)]
+for(i in 1:length(files)){
+  counts.ko[[i]] <- read.delim(files[i],
+                              quote = "", 
+                               stringsAsFactors = FALSE)
+  colnames(counts.ko[[i]]) <- gsub("_S.*","",colnames(counts.ko[[i]]))
+  
+  counts.ko[[i]] <- counts.ko[[i]][,colnames(counts$Bracken)]
+}
+names(counts.ko) <- gsub(".fmap.tsv","",gsub("counts.ko.","",basename(files)))
+names(counts.ko) <- gsub(".tsv","",gsub("counts.coverM.","",names(counts.ko)))
+
+lapply(counts.ko,function(x){head(colSums(x))})
+```
+
+```{r}
+batchid <- factor(metadata$run,
+                  levels=c("run1","run2","run3","pilot"))
+
+# conqur.covar <- metadata[,c('subject_id','sample_type','adm_to_sample_days')]
+conqur.covar <- metadata[,c('sample_type','adm_to_sample_days')]
+
+conqur.covar$sample_type <- ifelse(conqur.covar$sample_type=='TA',
+                                  1,
+                                  ifelse(conqur.covar$sample_type=='BAL',
+                                         2,
+                                         ifelse(conqur.covar$sample_type=='UA',3,4)))
+# conqur.covar$sex <- ifelse(conqur.covar$sex=='M',1,2)
+
+```
+
+## Run ConQuR
+```{r}
+counts.raw <- counts.ko
+for(i in 1:length(counts.raw)){
+  print(names(counts.ko[i]))
+  options(warn = -1) 
+  counts.ko[[i]] <- t(ConQuR(tax_tab=t(counts.raw[[i]]),
+                            batchid=batchid, 
+                            covariates=conqur.covar, 
+                            batch_ref="run1"))
+}
+
+save(counts.ko,
+     file=paste0(WORKING.DIR,"/counts_conqur_KO.R"))
+```

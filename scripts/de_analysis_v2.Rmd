@@ -1,0 +1,1029 @@
+---
+title: "DE analysis"
+output: html_document
+---
+
+# Preanalysis
+
+## Set inputs
+```{r}
+# library(ANCOMBC)
+library(ALDEx2)
+library(circlize)
+library(ComplexHeatmap)
+library(DESeq2)
+# library(dplyr)
+# library(egg)
+library(edgeR)
+library(ggplot2)
+library(ggrepel)
+# library(limma)
+# library(matrixStats)
+library(phyloseq)
+library(rlist)
+library(UpSetR)
+# library(vegan)
+
+WORKING.DIR="Z:/mchung/leopoldo_segal_07/"
+```
+
+## Load upstream object
+```{r}
+load(paste0(WORKING.DIR,"/upstream.R"))
+```
+
+```{r}
+counts <- counts$Bracken
+rownames(counts) <- gsub("^[[]Candida[]] glabrata$","Nakaseomyces glabratus",rownames(counts))
+
+annotation <- annotation$Bracken
+annotation$taxa <- gsub("^[[]Candida[]] glabrata$","Nakaseomyces glabratus",annotation$taxa)
+relab <- as.data.frame(apply(counts,2,function(x){x/sum(x)*100}))
+# 
+# write.table(counts,
+#             paste0(WORKING.DIR,"/counts.taxa.bracken.tsv"),
+#             row.names = T,
+#             col.names = T,
+#             quote = F,
+#             sep = "\t")
+# 
+# write.table(metadata,
+#             paste0(WORKING.DIR,"/metadata.tsv"),
+#             row.names = F,
+#             col.names = T,
+#             quote = F,
+#             sep = "\t")
+```
+
+## Filter low prevalence (<1%) and low relative abundance (<0.1%) taxa
+```{r}
+sample_types <- list("LA" = c("BAL","TA"),
+                     "UA" = c("UA"))
+
+filter_taxa <- list()
+for(i in 1:length(sample_types)){
+  counts.subset <- counts[,metadata$Sample.ID[metadata$sample_type %in% sample_types[[i]]]]
+  
+  relab.subset <- apply(counts.subset,2,function(x){x/sum(x)*100})
+  relab.taxa <- rownames(relab.subset)[rowMeans(relab.subset) >= 0.1]
+  
+  prev <- rowSums(as.data.frame(ifelse(counts.subset > 0,1,0)))/ncol(counts.subset)*100
+  prev.taxa <- rownames(counts.subset)[prev >= 1.0]
+
+  filter_taxa[[i]] <- intersect(relab.taxa,prev.taxa)
+}
+names(filter_taxa) <- names(sample_types)
+```
+
+## Set longitudinal sample list
+
+```{r,fig.height=4,fig.width=11}
+extract_longitudinal_samples <- function(metadata,sample_types){
+  metadata <- metadata[metadata$sample_type %in% sample_types,]
+  samples <- as.data.frame(table(metadata$subject_id))
+  samples <- samples[samples[,2] >= 3,1]
+  
+  metadata <- metadata[order(metadata$subject_id,metadata$intub_to_sample_days),]
+  metadata <- metadata[metadata$subject_id %in% samples,]
+
+  return(metadata$Sample.ID)
+}
+
+samples_longitudinal <- list("LA" = extract_longitudinal_samples(metadata, c("BAL","TA")),
+                             "UA" = extract_longitudinal_samples(metadata, c("UA")))
+```
+
+## Set single sample list
+
+```{r}
+one_sample_per_subject <- function(metadata,sample_types, week){
+  metadata <- metadata[metadata$sample_type %in% sample_types,]
+  metadata <- metadata[metadata$weekpostintub %in% week,]
+  metadata <- metadata[!duplicated(metadata$subject_id),]
+  return(metadata$Sample.ID)
+}
+
+# samples <- list("BAL_and_TA | Week 1" = one_sample_per_subject(metadata, c("BAL","TA"), week = c(1)),
+#                 "BAL_and_TA | Week 2" = one_sample_per_subject(metadata, c("BAL","TA"), week = c(2)),
+#                 "BAL_and_TA | Week 3" = one_sample_per_subject(metadata, c("BAL","TA"), week = c(3)),
+#                 "BAL_and_TA | Week 4" = one_sample_per_subject(metadata, c("BAL","TA"), week = c(4)),
+#                 "UA | Week 1" = one_sample_per_subject(metadata, c("UA"), week = c(1)),
+#                 "UA | Week 2" = one_sample_per_subject(metadata, c("UA"), week = c(2)),
+#                 "UA | Week 3" = one_sample_per_subject(metadata, c("UA"), week = c(3)),
+#                 "UA | Week 4" = one_sample_per_subject(metadata, c("UA"), week = c(4)))
+
+samples <- list("LA | Week 1" = one_sample_per_subject(metadata, c("BAL","TA"), week = c(1)),
+                "LA | Week 2" = one_sample_per_subject(metadata, c("BAL","TA"), week = c(2)),
+                "LA | Week 3+" = one_sample_per_subject(metadata, c("BAL","TA"), week = c(3,4)),
+                "UA | Week 1" = one_sample_per_subject(metadata, c("UA"), week = c(1)),
+                "UA | Week 2" = one_sample_per_subject(metadata, c("UA"), week = c(2)),
+                "UA | Week 3+" = one_sample_per_subject(metadata, c("UA"), week = c(3,4)))
+```
+
+## Plot sample distribution
+
+```{r,fig.height=4,fig.width=9}
+plot.df <- as.data.frame(cbind(names(samples),
+                               unlist(lapply(samples,length))))
+plot.df[,1] <- factor(plot.df[,1],levels=rev(names(samples)))
+plot.df[,2] <- as.numeric(as.character(plot.df[,2]))
+
+for(i in 1:nrow(plot.df)){
+  metadata.subset <- metadata[match(samples[[i]],metadata$Sample.ID),]
+  plot.df[i,3] <- nrow(metadata.subset[metadata.subset$dead_or_alive == "Alive",])
+  plot.df[i,4] <- nrow(metadata.subset[metadata.subset$dead_or_alive == "Dead",])
+}
+colnames(plot.df) <- c("Sample","# of Samples","Alive","Dead")
+plot.df <- reshape2::melt(plot.df)
+plot.df <- plot.df[plot.df[,2] != "# of Samples",]
+p1 <- ggplot()+
+  geom_bar(aes(x=!!plot.df[,3],
+               y=!!plot.df[,1],
+               fill=!!plot.df[,2]),
+           color="black",
+           stat="identity")+
+  labs(title="# of Samples for edgeR",x="# of samples",fill = "Outcome")+
+  theme_bw()+
+  theme(axis.title.y = element_blank())
+
+plot.df <- as.data.frame(cbind(names(samples),
+                               unlist(lapply(samples,length))))
+plot.df[,1] <- factor(plot.df[,1],levels=rev(names(samples)))
+plot.df[,2] <- as.numeric(as.character(plot.df[,2]))
+
+for(i in 1:nrow(plot.df)){
+  metadata.subset <- metadata[match(samples[[i]],metadata$Sample.ID),]
+  plot.df[i,3] <- nrow(metadata.subset[metadata.subset$dead_or_alive == "Alive",])
+  plot.df[i,4] <- nrow(metadata.subset[metadata.subset$dead_or_alive == "Dead",])
+}
+
+p2 <- ggplot()+
+  geom_bar(aes(x=plot.df[,3]/plot.df[,2] * 100,
+               y=plot.df[,1]),
+           stat="identity",
+           color="black",
+           fill = "red")+
+  labs(title="%tage of Dead",x="% of dead samples")+
+  theme_bw()+
+  theme(axis.title.y = element_blank())
+egg::ggarrange(p1,p2,nrow=1,labels=LETTERS[1:2],
+               widths = c(5,2))
+```
+
+## Plot counts distribution
+```{r,fig.height=5,fig.width=8}
+col1 <- c()
+col2 <- c()
+col3 <- c()
+col4 <- c()
+for(i in 1:length(samples)){
+  metadata.subset <- metadata[match(samples[[i]],metadata$Sample.ID),]
+  col1 <- c(col1,samples[[i]])
+  col2 <- c(col2,rep(names(samples)[i],length(samples[[i]])))
+  col3 <- c(col3,colSums(counts[,samples[[i]]]))
+  col4 <- c(col4,metadata.subset$dead_or_alive[match(samples[[i]],metadata.subset$Sample.ID)])
+}
+plot.df <- as.data.frame(cbind(col1,col2,col3,col4))
+plot.df[,2] <- factor(plot.df[,2],levels=rev(names(samples)))
+plot.df[,3] <- as.numeric(as.character(plot.df[,3]))
+plot.df[,5] <- gsub(" [|].*","",plot.df[,2])
+colnames(plot.df) <- c("sample","group","counts","dead_or_alive","sample_type")
+
+ggplot(plot.df,aes(counts,group,fill=dead_or_alive))+
+  geom_boxplot(outlier.shape = NA)+
+  geom_jitter(alpha=0.2)+
+  facet_wrap(sample_type ~ .,ncol = 1,scales="free")+
+  labs(title="Taxa Counts",fill="Outcome")+
+  theme_bw()+
+  theme(axis.title.y = element_blank())
+```
+
+
+# KO DE analysis
+
+## Load counts
+```{r}
+load("X:/mchung/leopoldo_segal_07/counts_conqur_KO.R")
+
+counts.raw <- counts.ko$pathway_metabolism
+rownames(counts.raw) <- gsub(".*: ","",rownames(counts.raw))
+counts.ko<- counts.raw[rowSums(counts.raw) >= 1000,]
+```
+
+
+## Run edgeR
+
+### Comparing Healthy v. Immunosuppressed
+
+```{r}
+edgeR.output <- list()
+for(i in 1:length(samples)){
+  sample_type <- gsub(" [|].*","",names(samples)[i])
+
+  counts.subset <- counts.ko[,samples[[i]]]
+  counts.subset <- counts.subset[,colSums(counts.subset) >= 2000]
+  metadata.subset <- metadata[match(colnames(counts.subset),metadata$Sample.ID),]
+  
+  imsupp <- factor(metadata.subset$is_immunosuppressed, levels=c("N","Y"))
+  #weekpostintub <- ifelse(metadata.subset$weekpostintub >= 4,3,metadata.subset$weekpostintub)
+  # run <- metadata.subset$run
+  
+  design <- model.matrix(~imsupp)
+  # design <- model.matrix(~imsupp + run)
+  
+  y <- DGEList(counts=counts.subset,
+               group=imsupp)
+  keep <- filterByExpr(y)  
+  y <- y[keep, , keep.lib.sizes = F]
+  y <- calcNormFactors(y, method="TMM")
+  y <- estimateDisp(y,design, robust=TRUE)
+  fit <- glmQLFit(y,design,robust=TRUE)
+    
+  # qlf <- glmQLFTest(fit,coef=2:length(unique(groups)))
+  qlf <- glmQLFTest(fit,coef=2)
+  de <- topTags(qlf,n=Inf)$table
+  edgeR.output[[i]] <- de
+  
+  print(length(rownames(edgeR.output[[i]])[edgeR.output[[i]]$FDR < 0.05 & !is.na(edgeR.output[[i]]$FDR)]))
+}
+names(edgeR.output) <- names(samples)
+edgeR.imsupp <- edgeR.output
+```
+
+
+### Comparing Alive v. Dead
+
+```{r}
+edgeR.output <- list()
+for(i in 1:length(samples)){
+  sample_type <- gsub(" [|].*","",names(samples)[i])
+
+  counts.subset <- counts.ko[,samples[[i]]]
+  counts.subset <- counts.subset[,colSums(counts.subset) >= 2000]
+  metadata.subset <- metadata[match(colnames(counts.subset),metadata$Sample.ID),]
+  
+  doa <- factor(metadata.subset$dead_or_alive, levels=c("Alive","Dead"))
+  #weekpostintub <- ifelse(metadata.subset$weekpostintub >= 4,3,metadata.subset$weekpostintub)
+  # run <- metadata.subset$run
+  
+  design <- model.matrix(~doa)
+  # design <- model.matrix(~imsupp + run)
+  
+  y <- DGEList(counts=counts.subset,
+               group=doa)
+  keep <- filterByExpr(y)  
+  y <- y[keep, , keep.lib.sizes = F]
+  y <- calcNormFactors(y, method="TMM")
+  y <- estimateDisp(y,design, robust=TRUE)
+  fit <- glmQLFit(y,design,robust=TRUE)
+    
+  # qlf <- glmQLFTest(fit,coef=2:length(unique(groups)))
+  qlf <- glmQLFTest(fit,coef=2)
+  de <- topTags(qlf,n=Inf)$table
+  edgeR.output[[i]] <- de
+  
+  print(length(rownames(edgeR.output[[i]])[edgeR.output[[i]]$FDR < 0.05 & !is.na(edgeR.output[[i]]$FDR)]))
+}
+names(edgeR.output) <- names(samples)
+edgeR.outcome <- edgeR.output
+```
+
+## Plot comparison dotplots
+
+### Compare DE results between Dead v. Alive results as dotplot
+```{r,fig.height=5,fig.width=10}
+edgeR.output <- edgeR.outcome
+
+ko.plots <- list()
+for(h in 1:1){
+  sample_sets <- grep(names(sample_types)[h],names(samples))
+  
+  taxa <- c()
+  logFC <- c()
+  for(i in sample_sets){
+    taxa <- c(taxa,rownames(edgeR.output[[i]])[edgeR.output[[i]]$FDR < 0.05])
+    logFC <- c(logFC,edgeR.output[[i]]$logFC[edgeR.output[[i]]$FDR < 0.05])
+  }
+  score <- ifelse(logFC > 0,1,-1)
+  taxa_stats <- as.data.frame(cbind(aggregate(score, by=list(Category=taxa), FUN=sum),
+                                    aggregate(logFC, by=list(Category=taxa), FUN=mean)))
+  taxa_stats <- taxa_stats[,c(1,2,4)]
+  top_taxa <- taxa_stats[order(-abs(taxa_stats[,2]),-abs(taxa_stats[,3])),1] 
+  
+  taxa <- list()
+  for(i in sample_sets){
+    taxa[[i]] <- rownames(edgeR.output[[i]])[edgeR.output[[i]]$FDR < 0.05 & !is.na(edgeR.output[[i]]$FDR)]
+  }
+  taxa <- unique(unlist(taxa))
+  taxa <- rev(top_taxa[top_taxa %in% taxa][1:50])
+  taxa <- taxa[!is.na(taxa)]
+  
+  logFC.df <- as.data.frame(matrix(nrow=length(taxa),
+                                   ncol=length(sample_sets)))
+  rownames(logFC.df) <- taxa
+  colnames(logFC.df) <- paste0("Week ",1:length(sample_sets))
+  logCPM.df <- logFC.df
+  sig.df <- logFC.df
+  for(i in 1:length(sample_sets)){
+    logFC.df[,i] <- edgeR.output[[sample_sets[i]]]$logFC[match(rownames(logFC.df),rownames(edgeR.output[[sample_sets[i]]]))]
+    logCPM.df[,i] <- edgeR.output[[sample_sets[i]]]$logCPM[match(rownames(logCPM.df),rownames(edgeR.output[[sample_sets[i]]]))]
+    sig.df[,i] <- ifelse(rownames(logFC.df) %in% rownames(edgeR.output[[sample_sets[i]]])[edgeR.output[[sample_sets[i]]]$FDR < 0.05 & !is.na(edgeR.output[[sample_sets[i]]]$FDR)],T,F)
+  }
+  
+  plot.df <- reshape2::melt(as.matrix(logFC.df))
+  colnames(plot.df) <- c("taxa","week","logFC")
+  # plot.df$taxa <- factor(plot.df$taxa,levels=rownames(logCPM.df)[order(rowMeans(logCPM.df))])
+  plot.df$logCPM <- reshape2::melt(as.matrix(logCPM.df))[,3]
+  plot.df$sig <- ifelse(reshape2::melt(as.matrix(sig.df))[,3] == T, plot.df$logFC,NA)
+  plot.df$kingdom <- annotation$superkingdom[match(plot.df$taxa,annotation$taxa)]
+  plot.df$color <- ifelse(is.na(plot.df$sig),NA,"black")
+  plot.df$alpha <- as.numeric(as.character(ifelse(is.na(plot.df$sig),0.2,1)))
+  
+  plot.df$logCPM <- as.numeric(ifelse(is.na(plot.df$logCPM),0,plot.df$logCPM))
+  
+  ko.plots[[h]] <- ggplot(plot.df,aes(x=logFC,y=taxa,fill=sig,color=color,alpha=alpha,size=logCPM))+
+    geom_segment(aes(xend=0),alpha=0.4,color="black",size=0.7)+
+    geom_point(pch=21,stat="identity")+
+    geom_vline(aes(xintercept = 0),
+               lty="dashed")+
+    facet_grid(.~week, scales="free_y",space = "free")+
+    scale_color_manual(values = c("black",NA))+
+    scale_size_area(limits=c(0,20))+
+    scale_fill_gradientn(limits = c(-3,3),colors=c("blue","white","red"),breaks=c(-2,0,2),oob = scales::squish)+
+    labs(title=names(sample_types)[h],fill="logFC")+
+    guides(alpha="none",color="none")+
+    theme_bw()+
+    theme(axis.title.y = element_blank(),
+          strip.background.y = element_blank(),
+          strip.text.y.right = element_text(hjust=0,angle = 0),
+          legend.position = "bottom")
+
+  plot(ko.plots[[h]])  
+}
+```
+
+
+### Compare DE results between Healthy v. Immunosuppressed results as dotplot
+```{r,fig.height=5,fig.width=10}
+edgeR.output <- edgeR.imsupp
+
+for(h in 1:1){
+  sample_sets <- grep(names(sample_types)[h],names(samples))
+  
+  taxa <- c()
+  logFC <- c()
+  for(i in sample_sets){
+    taxa <- c(taxa,rownames(edgeR.output[[i]])[edgeR.output[[i]]$FDR < 0.05])
+    logFC <- c(logFC,edgeR.output[[i]]$logFC[edgeR.output[[i]]$FDR < 0.05])
+  }
+  score <- ifelse(logFC > 0,1,-1)
+  taxa_stats <- as.data.frame(cbind(aggregate(score, by=list(Category=taxa), FUN=sum),
+                                    aggregate(logFC, by=list(Category=taxa), FUN=mean)))
+  taxa_stats <- taxa_stats[,c(1,2,4)]
+  top_taxa <- taxa_stats[order(-abs(taxa_stats[,2]),-abs(taxa_stats[,3])),1] 
+  
+  taxa <- list()
+  for(i in sample_sets){
+    taxa[[i]] <- rownames(edgeR.output[[i]])[edgeR.output[[i]]$FDR < 0.05 & !is.na(edgeR.output[[i]]$FDR)]
+  }
+  taxa <- unique(unlist(taxa))
+  taxa <- rev(top_taxa[top_taxa %in% taxa][1:50])
+  taxa <- taxa[!is.na(taxa)]
+  
+  logFC.df <- as.data.frame(matrix(nrow=length(taxa),
+                                   ncol=length(sample_sets)))
+  rownames(logFC.df) <- taxa
+  colnames(logFC.df) <- paste0("Week ",1:length(sample_sets))
+  logCPM.df <- logFC.df
+  sig.df <- logFC.df
+  for(i in 1:length(sample_sets)){
+    logFC.df[,i] <- edgeR.output[[sample_sets[i]]]$logFC[match(rownames(logFC.df),rownames(edgeR.output[[sample_sets[i]]]))]
+    logCPM.df[,i] <- edgeR.output[[sample_sets[i]]]$logCPM[match(rownames(logCPM.df),rownames(edgeR.output[[sample_sets[i]]]))]
+    sig.df[,i] <- ifelse(rownames(logFC.df) %in% rownames(edgeR.output[[sample_sets[i]]])[edgeR.output[[sample_sets[i]]]$FDR < 0.05 & !is.na(edgeR.output[[sample_sets[i]]]$FDR)],T,F)
+  }
+  
+  plot.df <- reshape2::melt(as.matrix(logFC.df))
+  colnames(plot.df) <- c("taxa","week","logFC")
+  # plot.df$taxa <- factor(plot.df$taxa,levels=rownames(logCPM.df)[order(rowMeans(logCPM.df))])
+  plot.df$logCPM <- reshape2::melt(as.matrix(logCPM.df))[,3]
+  plot.df$sig <- ifelse(reshape2::melt(as.matrix(sig.df))[,3] == T, plot.df$logFC,NA)
+  plot.df$kingdom <- annotation$superkingdom[match(plot.df$taxa,annotation$taxa)]
+  plot.df$color <- ifelse(is.na(plot.df$sig),NA,"black")
+  plot.df$alpha <- as.numeric(as.character(ifelse(is.na(plot.df$sig),0.2,1)))
+  
+  plot.df$logCPM <- as.numeric(ifelse(is.na(plot.df$logCPM),0,plot.df$logCPM))
+  
+  ko.plots[[2]] <- ggplot(plot.df,aes(x=logFC,y=taxa,fill=sig,color=color,alpha=alpha,size=logCPM))+
+    geom_segment(aes(xend=0),alpha=0.4,color="black",size=0.7)+
+    geom_point(pch=21,stat="identity")+
+    geom_vline(aes(xintercept = 0),
+               lty="dashed")+
+    facet_grid(.~week, scales="free_y",space = "free")+
+    scale_color_manual(values = c("black",NA))+
+    scale_size_area(limits=c(0,20))+
+    scale_fill_gradientn(limits = c(-3,3),colors=c("blue","white","red"),breaks=c(-2,0,2),oob = scales::squish)+
+    labs(title=names(sample_types)[h],fill="logFC")+
+    guides(alpha="none",color="none")+
+    theme_bw()+
+    theme(axis.title.y = element_blank(),
+          strip.background.y = element_blank(),
+          strip.text.y.right = element_text(hjust=0,angle = 0),
+          legend.position = "bottom")
+
+  plot(ko.plots[[2]])  
+}
+```
+
+
+# AMR DE analysis
+
+## Plot mupirocin specific heatmap
+```{r,fig.width = 11,fig.height=3}
+library(ComplexHeatmap)
+
+load("X:/mchung/leopoldo_segal_07/counts_conqur_KO.R")
+
+counts.raw <- counts.ko$MEGARes
+counts.raw <- counts.raw[!(grepl("RequiresSNPConfirmation",rownames(counts.raw))),]
+
+counts.amr <- counts.raw
+cpm.amr <- counts.amr/colSums(counts.amr) * 10^6
+cpm.mupi <- cpm.amr[grep("Mupirocin",rownames(cpm.amr)),]
+rownames(cpm.mupi) <- gsub("[|].*[|]",": ",rownames(cpm.mupi))
+
+mat <- as.matrix(log2(cpm.mupi+1))
+
+
+column_ha = HeatmapAnnotation("Group" = metadata$is_immunosuppressed,
+                              col = list(Group = c("N"="#377eb8","Y"="#e4211c"))) 
+                               
+Heatmap(mat,
+        name="log2CPM",
+        colorRamp2(c(0,15,30), c("#9bcec8", "#efe920", "#ee2623")),
+        top_annotation = column_ha,
+        column_split = metadata$is_immunosuppressed,
+        show_column_names = F)
+
+pdf(paste0(WORKING.DIR,"/plots/Fig4d.pdf"),
+    height=3,
+    width=11)
+Heatmap(mat,
+        name="log2CPM",
+        colorRamp2(c(0,15,30), c("#9bcec8", "#efe920", "#ee2623")),
+        top_annotation = column_ha,
+        column_split = metadata$is_immunosuppressed,
+        show_column_names = F)
+dev.off()
+```
+  
+## Load counts
+```{r}
+load("X:/mchung/leopoldo_segal_07/counts_conqur_KO.R")
+
+counts.raw <- counts.ko$MEGARes
+counts.raw <- counts.raw[!(grepl("RequiresSNPConfirmation",rownames(counts.raw))),]
+
+drug_categories <- strsplit(rownames(counts.raw),split="[|]")
+drug_categories <- unlist(lapply(drug_categories,function(x){return(x[3])}))
+
+counts.amr <- as.data.frame(matrix(nrow=length(unique(drug_categories)),
+                                   ncol=ncol(counts.raw)))
+rownames(counts.amr) <- unique(drug_categories)
+colnames(counts.amr) <- colnames(counts.raw)
+for(i in 1:nrow(counts.amr)){
+  counts.amr[i,] <- colSums(counts.raw[drug_categories == rownames(counts.amr)[i],,drop=F])
+}
+
+counts.amr <- counts.amr[rowSums(counts.amr) >= 50,]
+```
+
+## Run edgeR
+
+### Comparing Healthy v. Immunosuppressed
+
+```{r}
+edgeR.output <- list()
+for(i in 1:length(samples)){
+  sample_type <- gsub(" [|].*","",names(samples)[i])
+
+  counts.subset <- counts.amr[,samples[[i]]]
+  counts.subset <- counts.subset[,colSums(counts.subset) >= 100]
+  metadata.subset <- metadata[match(colnames(counts.subset),metadata$Sample.ID),]
+  
+  imsupp <- factor(metadata.subset$is_immunosuppressed, levels=c("N","Y"))
+  #weekpostintub <- ifelse(metadata.subset$weekpostintub >= 4,3,metadata.subset$weekpostintub)
+  # run <- metadata.subset$run
+  
+  design <- model.matrix(~imsupp)
+  # design <- model.matrix(~imsupp + run)
+  
+  y <- DGEList(counts=counts.subset,
+               group=imsupp)
+  keep <- filterByExpr(y)  
+  y <- y[keep, , keep.lib.sizes = F]
+  y <- calcNormFactors(y, method="TMM")
+  y <- estimateDisp(y,design, robust=TRUE)
+  fit <- glmQLFit(y,design,robust=TRUE)
+    
+  # qlf <- glmQLFTest(fit,coef=2:length(unique(groups)))
+  qlf <- glmQLFTest(fit,coef=2)
+  de <- topTags(qlf,n=Inf)$table
+  edgeR.output[[i]] <- de
+  
+  print(length(rownames(edgeR.output[[i]])[edgeR.output[[i]]$FDR < 0.05 & !is.na(edgeR.output[[i]]$FDR)]))
+}
+names(edgeR.output) <- names(samples)
+edgeR.imsupp <- edgeR.output
+```
+
+
+### Comparing Alive v. Dead
+
+```{r}
+edgeR.output <- list()
+for(i in 1:length(samples)){
+  sample_type <- gsub(" [|].*","",names(samples)[i])
+
+  counts.subset <- counts.amr[,samples[[i]]]
+  counts.subset <- counts.subset[,colSums(counts.subset) >= 100]
+  metadata.subset <- metadata[match(colnames(counts.subset),metadata$Sample.ID),]
+  
+  doa <- factor(metadata.subset$dead_or_alive, levels=c("Alive","Dead"))
+  #weekpostintub <- ifelse(metadata.subset$weekpostintub >= 4,3,metadata.subset$weekpostintub)
+  # run <- metadata.subset$run
+  
+  design <- model.matrix(~doa)
+  # design <- model.matrix(~imsupp + run)
+  
+  y <- DGEList(counts=counts.subset,
+               group=doa)
+  keep <- filterByExpr(y)  
+  y <- y[keep, , keep.lib.sizes = F]
+  y <- calcNormFactors(y, method="TMM")
+  y <- estimateDisp(y,design, robust=TRUE)
+  fit <- glmQLFit(y,design,robust=TRUE)
+    
+  # qlf <- glmQLFTest(fit,coef=2:length(unique(groups)))
+  qlf <- glmQLFTest(fit,coef=2)
+  de <- topTags(qlf,n=Inf)$table
+  edgeR.output[[i]] <- de
+  
+  print(length(rownames(edgeR.output[[i]])[edgeR.output[[i]]$FDR < 0.05 & !is.na(edgeR.output[[i]]$FDR)]))
+}
+names(edgeR.output) <- names(samples)
+edgeR.outcome <- edgeR.output
+```
+
+
+## Plot comparison dotplots
+
+### Compare DE results between Healthy v. Immunosuppressed results as dotplot
+```{r,fig.height=5,fig.width=10}
+edgeR.output <- edgeR.imsupp
+
+amr.plots <- list()
+for(h in 1:length(sample_types)){
+  sample_sets <- grep(names(sample_types)[h],names(samples))
+  
+  taxa <- c()
+  logFC <- c()
+  for(i in sample_sets){
+    taxa <- c(taxa,rownames(edgeR.output[[i]]))
+    logFC <- c(logFC,edgeR.output[[i]]$logFC)
+  }
+  score <- ifelse(logFC > 0,1,-1)
+  taxa_stats <- as.data.frame(cbind(aggregate(score, by=list(Category=taxa), FUN=sum),
+                                    aggregate(logFC, by=list(Category=taxa), FUN=mean)))
+  taxa_stats <- taxa_stats[,c(1,2,4)]
+  top_taxa <- taxa_stats[order(-abs(taxa_stats[,2]),-abs(taxa_stats[,3])),1] 
+  
+  taxa <- rev(top_taxa[top_taxa %in% taxa][1:50])
+  taxa <- taxa[!is.na(taxa)]
+  
+  logFC.df <- as.data.frame(matrix(nrow=length(taxa),
+                                   ncol=length(sample_sets)))
+  rownames(logFC.df) <- taxa
+  colnames(logFC.df) <- paste0("Week ",1:length(sample_sets))
+  logCPM.df <- logFC.df
+  sig.df <- logFC.df
+  for(i in 1:length(sample_sets)){
+    logFC.df[,i] <- edgeR.output[[sample_sets[i]]]$logFC[match(rownames(logFC.df),rownames(edgeR.output[[sample_sets[i]]]))]
+    logCPM.df[,i] <- edgeR.output[[sample_sets[i]]]$logCPM[match(rownames(logCPM.df),rownames(edgeR.output[[sample_sets[i]]]))]
+    sig.df[,i] <- ifelse(rownames(logFC.df) %in% rownames(edgeR.output[[sample_sets[i]]])[edgeR.output[[sample_sets[i]]]$FDR < 0.05 & !is.na(edgeR.output[[sample_sets[i]]]$FDR)],T,F)
+  }
+  
+  plot.df <- reshape2::melt(as.matrix(logFC.df))
+  colnames(plot.df) <- c("taxa","week","logFC")
+  # plot.df$taxa <- factor(plot.df$taxa,levels=rownames(logCPM.df)[order(rowMeans(logCPM.df))])
+  plot.df$logCPM <- reshape2::melt(as.matrix(logCPM.df))[,3]
+  plot.df$sig <- ifelse(reshape2::melt(as.matrix(sig.df))[,3] == T, plot.df$logFC,NA)
+  plot.df$kingdom <- annotation$superkingdom[match(plot.df$taxa,annotation$taxa)]
+  plot.df$color <- ifelse(is.na(plot.df$sig),NA,"black")
+  plot.df$alpha <- as.numeric(as.character(ifelse(is.na(plot.df$sig),0.2,1)))
+  
+  plot.df$logCPM <- as.numeric(ifelse(is.na(plot.df$logCPM),0,plot.df$logCPM))
+
+  amr.plots[[h]] <- ggplot(plot.df,aes(x=logFC,y=taxa,fill=sig,color=color,alpha=alpha,size=logCPM))+
+    geom_segment(aes(xend=0),alpha=0.4,color="black",size=0.7)+
+    geom_point(pch=21,stat="identity")+
+    geom_vline(aes(xintercept = 0),
+               lty="dashed")+
+    facet_grid(.~week, scales="free_y",space = "free")+
+    scale_color_manual(values = c("black",NA))+
+    scale_size_area(limits=c(0,20))+
+    scale_fill_gradientn(limits = c(-3,3),colors=c("blue","white","red"),breaks=c(-2,0,2),oob = scales::squish)+
+    labs(title=names(sample_types)[h],fill="logFC")+
+    guides(alpha="none",color="none")+
+    theme_bw()+
+    theme(axis.title.y = element_blank(),
+          strip.background.y = element_blank(),
+          strip.text.y.right = element_text(hjust=0,angle = 0),
+          legend.position = "bottom")
+
+  plot(amr.plots[[h]])  
+}
+```
+
+# Plot final figure
+```{r,fig.height=8,fig.width=11}
+egg::ggarrange(ko.plots[[1]]+
+                 guides(fill="none",size="none")+
+                 theme(plot.title = element_blank()),
+               ko.plots[[2]]+
+                 theme(legend.position = "right")+
+                 theme(plot.title = element_blank()),
+               amr.plots[[1]]+
+                 guides(fill="none",size="none")+
+                 theme(plot.title = element_blank()),
+               heights=c(7.5,6.5,5.5),
+               labels=LETTERS[1:3],
+               ncol=1)
+
+pdf(paste0(WORKING.DIR,"/plots/Fig4abc.pdf"),
+    height=8,
+    width=11)
+egg::ggarrange(ko.plots[[1]]+
+                 guides(fill="none",size="none")+
+                 theme(plot.title = element_blank()),
+               ko.plots[[2]]+
+                 theme(legend.position = "right")+
+                 theme(plot.title = element_blank()),
+               amr.plots[[1]]+
+                 guides(fill="none",size="none")+
+                 theme(plot.title = element_blank()),
+               heights=c(7.5,6.5,5.5),
+               labels=LETTERS[1:3],
+               ncol=1)
+dev.off()
+```
+# Taxa DE analysis
+
+## Run edgeR
+
+### Comparing Healthy v. Immunosuppressed
+
+```{r}
+edgeR.output <- list()
+for(i in 1:length(samples)){
+  sample_type <- gsub(" [|].*","",names(samples)[i])
+  taxa <- filter_taxa[[sample_type]]
+    
+  counts.subset <- counts[taxa,samples[[i]]]
+  metadata.subset <- metadata[match(samples[[i]],metadata$Sample.ID),]
+  
+  imsupp <- factor(metadata.subset$is_immunosuppressed, levels=c("N","Y"))
+  #weekpostintub <- ifelse(metadata.subset$weekpostintub >= 4,3,metadata.subset$weekpostintub)
+  # run <- metadata.subset$run
+  
+  design <- model.matrix(~imsupp)
+  # design <- model.matrix(~imsupp + run)
+  
+  y <- DGEList(counts=counts.subset,
+               group=imsupp)
+  keep <- filterByExpr(y)  
+  y <- y[keep, , keep.lib.sizes = F]
+  y <- calcNormFactors(y, method="TMM")
+  y <- estimateDisp(y,design, robust=TRUE)
+  fit <- glmQLFit(y,design,robust=TRUE)
+    
+  # qlf <- glmQLFTest(fit,coef=2:length(unique(groups)))
+  qlf <- glmQLFTest(fit,coef=2)
+  de <- topTags(qlf,n=Inf)$table
+  edgeR.output[[i]] <- de
+  
+  print(length(rownames(edgeR.output[[i]])[edgeR.output[[i]]$FDR < 0.05 & !is.na(edgeR.output[[i]]$FDR)]))
+}
+names(edgeR.output) <- names(samples)
+edgeR.imsupp <- edgeR.output
+```
+
+
+
+### Comparing Alive v. Dead
+
+```{r}
+edgeR.output <- list()
+for(i in 1:length(samples)){
+  sample_type <- gsub(" [|].*","",names(samples)[i])
+  taxa <- filter_taxa[[sample_type]]
+    
+  counts.subset <- counts[taxa,samples[[i]]]
+  counts.subset <- counts.subset[rowSums(counts.subset) != 0,]
+  metadata.subset <- metadata[match(samples[[i]],metadata$Sample.ID),]
+  
+  doa <- factor(metadata.subset$dead_or_alive, levels=c("Alive","Dead"))
+  #weekpostintub <- ifelse(metadata.subset$weekpostintub >= 4,3,metadata.subset$weekpostintub)
+  # run <- metadata.subset$run
+  
+  design <- model.matrix(~doa)
+  # design <- model.matrix(~imsupp + run)
+  
+  y <- DGEList(counts=counts.subset,
+               group=doa)
+  keep <- filterByExpr(y)  
+  y <- y[keep, , keep.lib.sizes = F]
+  y <- calcNormFactors(y, method="TMM")
+  y <- estimateDisp(y,design, robust=TRUE)
+  fit <- glmQLFit(y,design,robust=TRUE)
+    
+  # qlf <- glmQLFTest(fit,coef=2:length(unique(groups)))
+  qlf <- glmQLFTest(fit,coef=2)
+  de <- topTags(qlf,n=Inf)$table
+  edgeR.output[[i]] <- de
+  
+  print(length(rownames(edgeR.output[[i]])[edgeR.output[[i]]$FDR < 0.05 & !is.na(edgeR.output[[i]]$FDR)]))
+}
+names(edgeR.output) <- names(samples)
+edgeR.outcome <- edgeR.output
+```
+
+
+## Plot UpsetR of DE taxa
+```{r}
+up.imsupp <- list()
+down.imsupp <- list()
+up.outcome <- list()
+down.outcome <- list()
+for(i in 1:length(edgeR.imsupp)){
+  up.imsupp[[i]] <- rownames(edgeR.imsupp[[i]])[edgeR.imsupp[[i]]$FDR < 0.05 & edgeR.imsupp[[i]]$logFC > 0]
+  down.imsupp[[i]] <- rownames(edgeR.imsupp[[i]])[edgeR.imsupp[[i]]$FDR < 0.05 & edgeR.imsupp[[i]]$logFC < 0]
+  
+  up.outcome[[i]] <- rownames(edgeR.outcome[[i]])[edgeR.outcome[[i]]$FDR < 0.05 & edgeR.outcome[[i]]$logFC > 0]
+  down.outcome[[i]] <- rownames(edgeR.outcome[[i]])[edgeR.outcome[[i]]$FDR < 0.05 & edgeR.outcome[[i]]$logFC < 0]
+}
+names(up.imsupp) <- names(edgeR.imsupp)
+names(down.imsupp) <- names(edgeR.imsupp)
+names(up.outcome) <- names(edgeR.outcome)
+names(down.outcome) <- names(edgeR.outcome)
+```
+
+
+```{r,fig.height=3,fig.width=5}
+ymax <- 25
+scalemax <- 40
+
+pdf(paste0(WORKING.DIR,"/plots/Fig3ab.pdf"),
+    height=3,
+    width=5)
+m <- fromList(up.imsupp[1:3])
+upset(m,sets=rev(names(m)),order.by = "freq",keep.order=T,mainbar.y.max=ymax, set_size.scale_max = scalemax,set_size.show=T,empty.intersections=T)
+m <- fromList(down.imsupp[1:3])
+upset(m,sets=rev(names(m)),order.by = "freq",keep.order=T,mainbar.y.max=ymax, set_size.scale_max = scalemax,set_size.show=T,empty.intersections=T)
+
+m <- fromList(up.outcome[1:3])
+upset(m,sets=rev(names(m)),order.by = "freq",keep.order=T,mainbar.y.max=ymax, set_size.scale_max = scalemax,set_size.show=T,empty.intersections=T)
+m <- fromList(down.outcome[1:3])
+upset(m,sets=rev(names(m)),order.by = "freq",keep.order=T,mainbar.y.max=ymax, set_size.scale_max = scalemax,set_size.show=T,empty.intersections=T)
+dev.off()
+```
+
+
+## Plot comparison dotplots
+
+### Compare DE results between Alive v. Dead results in Immuno as scatterplot
+```{r,fig.height=6,fig.width=16}
+xlab <- "logFC outcome"
+edgeR.1 <- edgeR.outcome
+
+ylab <- "logFC outcome in immunocompetent"
+edgeR.2 <- edgeR.imsupp
+
+up.labs <- sort(-table(c(unlist(up.imsupp[1:3]),
+                         unlist(up.outcome[1:3]))))
+up.labs <- names(up.labs)[abs(up.labs) >= 2]
+
+down.labs <- sort(-table(c(unlist(down.imsupp[1:3]),
+                         unlist(down.outcome[1:3]))))
+down.labs <- names(down.labs)[abs(down.labs) >= 2]
+
+labs <- c(up.labs,down.labs)
+
+plot.list <- c()
+for(i in 1:length(samples)){
+  taxa <- unique(c(rownames(edgeR.1[[i]]),rownames(edgeR.2[[i]])))
+  
+  x <- edgeR.1[[i]]$logFC[match(taxa,rownames(edgeR.1[[i]]))]
+  sig.x <- edgeR.1[[i]]$FDR[match(taxa,rownames(edgeR.1[[i]]))]
+  
+  y <- edgeR.2[[i]]$logFC[match(taxa,rownames(edgeR.2[[i]]))]
+  sig.y <- edgeR.2[[i]]$FDR[match(taxa,rownames(edgeR.2[[i]]))]
+
+  counts.subset <- DGEList(counts = counts[,samples[[i]]])
+  cpm <- aveLogCPM(counts.subset)
+  
+  plot.df <- as.data.frame(cbind(taxa,x,sig.x,y,sig.y))
+  plot.df$cpm <- cpm[match(taxa,rownames(counts))]
+  
+  plot.df$x <- as.numeric(as.character(plot.df$x))
+  plot.df$sig.x <- as.numeric(as.character(plot.df$sig.x))
+
+  plot.df$y <- as.numeric(as.character(plot.df$y))
+  plot.df$sig.y <- as.numeric(as.character(plot.df$sig.y))
+
+  plot.df <- plot.df[order(abs(rowMeans(plot.df[,c(2,4)])),decreasing=T),]
+  plot.df$taxa <- factor(plot.df$taxa,levels=plot.df$taxa)
+
+  plot.df$label <- ifelse(plot.df$sig.x < 0.05 & plot.df$sig.y < 0.05,
+                          as.character(plot.df$taxa),NA)
+  labs <- plot.df$label[!is.na(plot.df$label)][1:15]
+  
+  rm(taxa)
+  plot.list[[i]] <- ggplot(plot.df,aes(x=x,y=y))+
+    geom_vline(aes(xintercept=0),lty="dashed")+
+    geom_hline(aes(yintercept=0),lty="dashed")+
+    geom_point(alpha=ifelse(plot.df$sig.x < 0.05 & plot.df$sig.y < 0.05,
+                            0.5,
+                            0),
+               color=ifelse(plot.df$sig.x < 0.05 & plot.df$sig.y < 0.05,
+                            ifelse(plot.df$x > 0 & plot.df$y > 0,
+                                   "red",
+                                   ifelse(plot.df$x < 0 & plot.df$y < 0,
+                                         "blue",
+                                         "grey")),
+                           "black"),
+               size=plot.df$cpm)+
+    # geom_text_repel(label=ifelse(plot.df$sig.x < 0.05 & plot.df$sig.y < 0.05,
+    #                              taxa,
+    #                              NA),
+    #                 size=4)+
+    geom_text_repel(label=ifelse(plot.df$label %in% labs,plot.df$label,NA),
+                    max.overlaps=50,
+                    size=4)+
+    # scale_size_continuous(breaks=seq(2,20,2))+
+    coord_cartesian(xlim=c(-10,10),ylim=c(-10,10))+
+    labs(title=names(samples)[i],
+           x=xlab,
+           y=ylab)+
+    theme_bw()
+}
+egg::ggarrange(plot.list[[1]],plot.list[[2]],plot.list[[3]],
+               nrow=1,
+               labels=LETTERS[1:3])
+egg::ggarrange(plot.list[[4]],plot.list[[5]],plot.list[[6]],
+               nrow=1,
+               labels=LETTERS[1:3])
+
+
+pdf(paste0(WORKING.DIR,"/plots/Fig3c.pdf"),
+    height=6,
+    width=16)
+egg::ggarrange(plot.list[[1]],plot.list[[2]],plot.list[[3]],
+               nrow=1,
+               labels=LETTERS[1:3])
+dev.off()
+```
+
+### Plot dot/bar plots of top DE results by week
+
+```{r,fig.height=15,fig.width=10}
+# edgeR.output <- edgeR.imsupp
+edgeR.output <- edgeR.outcome
+# edgeR.output <- edgeR.outcome.immunocompetent
+# edgeR.output <- edgeR.outcome.immunocompromised
+
+for(h in 1:length(sample_types)){
+  sample_sets <- grep(names(sample_types)[h],names(samples))
+  
+  taxa <- c()
+  logFC <- c()
+  for(i in sample_sets){
+    taxa <- c(taxa,rownames(edgeR.output[[i]])[edgeR.output[[i]]$FDR < 0.05])
+    logFC <- c(logFC,edgeR.output[[i]]$logFC[edgeR.output[[i]]$FDR < 0.05])
+  }
+  score <- ifelse(logFC > 0,1,-1)
+  taxa_stats <- as.data.frame(cbind(aggregate(score, by=list(Category=taxa), FUN=sum),
+                                    aggregate(logFC, by=list(Category=taxa), FUN=mean)))
+  taxa_stats <- taxa_stats[,c(1,2,4)]
+  top_taxa <- taxa_stats[order(-abs(taxa_stats[,2]),-abs(taxa_stats[,3])),1] 
+  
+  taxa <- list()
+  for(i in sample_sets){
+    taxa[[i]] <- rownames(edgeR.output[[i]])[edgeR.output[[i]]$FDR < 0.05 & !is.na(edgeR.output[[i]]$FDR)]
+  }
+  taxa <- unique(unlist(taxa))
+  # taxa <- rev(top_taxa[top_taxa %in% taxa][1:50])
+  # taxa <- rev(top_taxa[top_taxa %in% taxa])
+
+  logFC.df <- as.data.frame(matrix(nrow=length(taxa),
+                                   ncol=length(sample_sets)))
+  rownames(logFC.df) <- taxa
+  colnames(logFC.df) <- paste0("Week ",1:length(sample_sets))
+  logCPM.df <- logFC.df
+  sig.df <- logFC.df
+  for(i in 1:length(sample_sets)){
+    logFC.df[,i] <- edgeR.output[[sample_sets[i]]]$logFC[match(rownames(logFC.df),rownames(edgeR.output[[sample_sets[i]]]))]
+    logCPM.df[,i] <- edgeR.output[[sample_sets[i]]]$logCPM[match(rownames(logCPM.df),rownames(edgeR.output[[sample_sets[i]]]))]
+    sig.df[,i] <- ifelse(rownames(logFC.df) %in% rownames(edgeR.output[[sample_sets[i]]])[edgeR.output[[sample_sets[i]]]$FDR < 0.05 & !is.na(edgeR.output[[sample_sets[i]]]$FDR)],T,F)
+  }
+  
+  plot.df <- reshape2::melt(as.matrix(logFC.df))
+  colnames(plot.df) <- c("taxa","week","logFC")
+  # plot.df$taxa <- factor(plot.df$taxa,levels=rownames(logCPM.df)[order(rowMeans(logCPM.df))])
+  plot.df$logCPM <- reshape2::melt(as.matrix(logCPM.df))[,3]
+  plot.df$sig <- ifelse(reshape2::melt(as.matrix(sig.df))[,3] == T, plot.df$logFC,NA)
+  plot.df$kingdom <- annotation$superkingdom[match(plot.df$taxa,annotation$taxa)]
+  plot.df$color <- ifelse(is.na(plot.df$sig),NA,"black")
+  plot.df$alpha <- as.numeric(as.character(ifelse(is.na(plot.df$sig),0.2,1)))
+  
+  p1 <- ggplot(plot.df,aes(x=logFC,y=taxa,fill=sig,color=color,alpha=alpha,size=logCPM))+
+    geom_segment(aes(xend=0),alpha=0.4,color="black",size=0.7)+
+    geom_point(pch=21,stat="identity")+
+    geom_vline(aes(xintercept = 0),
+               lty="dashed")+
+    facet_grid(kingdom~week, scales="free_y",space = "free")+
+    scale_color_manual(values = c("black",NA))+
+    scale_fill_gradient2(low="blue",high="red")+
+    labs(title=names(sample_types)[h],fill="logFC")+
+    guides(alpha="none",color="none")+
+    theme_bw()+
+    theme(axis.title.y = element_blank(),
+          strip.background.y = element_blank(),
+          strip.text.y.right = element_text(hjust=0,angle = 0),
+          legend.position = "bottom")
+
+  plot(p1)
+  
+  # pdf(paste0(WORKING.DIR,"/plots/SupFig5.pdf"),
+  #     height=15,
+  #     width=10)
+  
+  pdf(paste0(WORKING.DIR,"/plots/SupFig6.pdf"),
+      height=15,
+      width=10)
+  plot(p1)
+  dev.off()
+}
+```
+
+```{r,fig.height=11,fig.width=16}
+plot.list <- c()
+for(i in 1:length(samples)){
+  taxa <- unique(c(rownames(edgeR.outcome[[i]]),rownames(edgeR.imsupp[[i]])))
+  x <- edgeR.outcome[[i]]$logFC[match(taxa,rownames(edgeR.outcome[[i]]))]
+  sig.x <- edgeR.outcome[[i]]$FDR[match(taxa,rownames(edgeR.outcome[[i]]))]
+  
+  y <- edgeR.imsupp[[i]]$logFC[match(taxa,rownames(edgeR.imsupp[[i]]))]
+  sig.y <- edgeR.imsupp[[i]]$FDR[match(taxa,rownames(edgeR.imsupp[[i]]))]
+
+  counts.subset <- DGEList(counts = counts[,samples[[i]]])
+  cpm <- aveLogCPM(counts.subset)
+  
+  plot.df <- as.data.frame(cbind(taxa,x,sig.x,y,sig.y))
+  plot.df$cpm <- cpm[match(taxa,rownames(counts))]
+  
+  plot.df$x <- as.numeric(as.character(plot.df$x))
+  plot.df$sig.x <- as.numeric(as.character(plot.df$sig.x))
+
+  plot.df$y <- as.numeric(as.character(plot.df$y))
+  plot.df$sig.y <- as.numeric(as.character(plot.df$sig.y))
+
+  plot.list[[i]] <- ggplot(plot.df,aes(x=x,y=y,label=taxa))+
+    geom_vline(aes(xintercept=0),lty="dashed")+
+    geom_hline(aes(yintercept=0),lty="dashed")+
+    geom_point(alpha=ifelse(plot.df$sig.x < 0.05 & plot.df$sig.y < 0.05,
+                            0.5,
+                            0.05),
+               color=ifelse(plot.df$sig.x < 0.05 & plot.df$sig.y < 0.05,
+                            ifelse(plot.df$x > 0 & plot.df$y > 0,
+                                   "red",
+                                   ifelse(plot.df$x < 0 & plot.df$y < 0,
+                                         "blue",
+                                         "black")),
+                           "black"),
+               size=plot.df$cpm)+
+    geom_text_repel(label=ifelse(plot.df$sig.x < 0.05 & plot.df$sig.y < 0.05,
+                                 taxa,
+                                 NA),
+                    size=4)+
+    # scale_size_continuous(breaks=seq(2,20,2))+
+    # coord_cartesian(xlim=c(-15,15),ylim=c(-15,15))+
+    labs(title=names(samples)[i],
+           x="logFC outcome",
+           y="logFC immune status")+
+    theme_bw()
+}
+egg::ggarrange(plots=plot.list,
+               nrow=2,
+               labels=LETTERS[1:6])
+```
+

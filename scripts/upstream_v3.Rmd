@@ -1,0 +1,224 @@
+---
+title: "Untitled"
+output: html_document
+---
+
+# Preanalysis
+
+## Load packages
+```{r}
+library(ConQuR)
+library(doParallel)
+library(dplyr)
+
+WORKING.DIR="Z:/mchung/leopoldo_segal_07/"
+```
+
+# Set up metadata
+
+This includes combining imsupp and nonimsupp samples, fixing sample names, and removing blood samples.
+
+## Read in metadata
+```{r}
+runs <- list.files(paste0(WORKING.DIR,"/pipeline_output/"))
+
+metadata.imsupp <- read.delim(paste0(WORKING.DIR,"/tables/w1to3_smpl_metadatamapping_covidpos_intub_imsupp_sequenced.csv"),
+                              sep=",")
+metadata.notimsupp <- read.delim(paste0(WORKING.DIR,"/tables/w1to3_smpl_metadatamapping_covidpos_intub_notimsupp_sequenced.csv"),
+                                 row.names = 1,
+                              sep=",")
+```
+
+## Fix metadata information
+
+```{r}
+metadata <- as.data.frame(rbind(metadata.imsupp[,intersect(colnames(metadata.imsupp),colnames(metadata.notimsupp))],
+                                metadata.notimsupp[,intersect(colnames(metadata.imsupp),colnames(metadata.notimsupp))]))
+metadata <- metadata[order(metadata$collection_date),]
+metadata$Sample.ID[metadata$yl_sample_id == "UCS.0136.BKG.MainEvent"] <- "UCS.0136.BKG"
+metadata <- metadata[metadata$sample_type != "Blood",] 
+metadata$imsupp <-ifelse(metadata$Sample.ID %in% metadata.imsupp$Sample.ID,"Immunosuppressed","Healthy")
+
+metadata$intub_to_sample_days <- as.numeric(as.character(metadata$intub_to_sample_days))
+metadata <- metadata %>% mutate(weekpostintub=case_when(
+                  intub_to_sample_days < 7 ~ 1,
+                  intub_to_sample_days > 6 &  intub_to_sample_days < 14~ 2,
+                  intub_to_sample_days > 13 &  intub_to_sample_days < 21~ 3,
+                  intub_to_sample_days > 20 ~ 4))
+
+metadata$run <- ifelse(metadata$run1_rna == 1,"run1",
+                       ifelse(metadata$run2_rna == 1, "run2",
+                              ifelse(metadata$run3_rna == 1,"run3","pilot")))
+```
+
+# Set up annotations
+
+## Create annotation object
+
+```{r}
+annotation <- list()
+```
+
+## Read Bracken taxa information
+
+```{r}
+annotation$Bracken <- as.data.frame(matrix(nrow=0,ncol=0))
+for(i in 1:length(runs)){
+  file <- read.delim(paste0(WORKING.DIR,"/pipeline_output/",runs[i],"/tables/annotation.taxa.bracken.tsv"))
+  annotation$Bracken <- as.data.frame(rbind(annotation$Bracken,file))
+}
+annotation$Bracken <- annotation$Bracken[!duplicated(annotation$Bracken$taxa),]
+```
+
+# Set up counts
+
+## Create counts object
+
+```{r}
+counts <- list()
+```
+
+## Read in counts
+
+### Read AMR gene counts for CARD
+
+```{r}
+rownames <- c()
+for(i in 1:length(runs)){
+  file <- read.delim(paste0(WORKING.DIR,"/pipeline_output/",runs[i],"/tables/counts.coverM.CARD.tsv"))
+  rownames <- unique(c(rownames,rownames(file)))
+}
+counts$CARD <- as.data.frame(matrix(nrow=length(rownames),
+                                    ncol=0))
+rownames(counts$CARD) <- rownames
+for(i in 1:length(runs)){
+  file <- read.delim(paste0(WORKING.DIR,"/pipeline_output/",runs[i],"/tables/counts.coverM.CARD.tsv"))
+  counts$CARD <- as.data.frame(cbind(counts$CARD,
+                                     file[match(rownames(counts$CARD),rownames(file)),]))
+}
+```
+
+### Read AMR gene counts for MEGARes
+
+```{r}
+rownames <- c()
+for(i in 1:length(runs)){
+  file <- read.delim(paste0(WORKING.DIR,"/pipeline_output/",runs[i],"/tables/counts.coverM.MEGARes.tsv"))
+  rownames <- unique(c(rownames,rownames(file)))
+}
+counts$MEGARes <- as.data.frame(matrix(nrow=length(rownames),
+                                    ncol=0))
+rownames(counts$MEGARes) <- rownames
+for(i in 1:length(runs)){
+  file <- read.delim(paste0(WORKING.DIR,"/pipeline_output/",runs[i],"/tables/counts.coverM.MEGARes.tsv"))
+  counts$MEGARes <- as.data.frame(cbind(counts$MEGARes,
+                                     file[match(rownames(counts$MEGARes),rownames(file)),]))
+}
+```
+
+### Read taxa gene counts for Bracken
+
+```{r}
+rownames <- c()
+for(i in 1:length(runs)){
+  file <- read.delim(paste0(WORKING.DIR,"/pipeline_output/",runs[i],"/tables/counts.taxa.Bracken.tsv"))
+  rownames <- unique(c(rownames,rownames(file)))
+}
+counts$Bracken <- as.data.frame(matrix(nrow=length(rownames),
+                                       ncol=0))
+rownames(counts$Bracken) <- rownames
+for(i in 1:length(runs)){
+  file <- read.delim(paste0(WORKING.DIR,"/pipeline_output/",runs[i],"/tables/counts.taxa.Bracken.tsv"))
+  counts$Bracken <- as.data.frame(cbind(counts$Bracken,
+                                     file[match(rownames(counts$Bracken),rownames(file)),]))
+}
+counts$Bracken[is.na(counts$Bracken)] <- 0
+
+counts$Bracken <- counts$Bracken[match(annotation$Bracken$taxa,rownames(counts$Bracken)),]
+```
+
+#### Edit SARS-CoV2 name
+
+```{r}
+rownames(counts$Bracken) <- gsub("Severe acute respiratory syndrome-related coronavirus","SARS-CoV2",rownames(counts$Bracken))
+annotation$Bracken$taxa <- gsub("Severe acute respiratory syndrome-related coronavirus","SARS-CoV2",annotation$Bracken$taxa)
+```
+
+#### Remove human and protozoan entries
+
+```{r}
+bad_taxa <- c("Homo sapiens","Equine infectious anemia virus",
+              annotation$Bracken$taxa[annotation$Bracken$superkingdom == "Eukaryota" &
+                                      !is.na(annotation$Bracken$superkingdom) & 
+                                      is.na(annotation$Bracken$kingdom)])
+
+counts$Bracken <- counts$Bracken[!(rownames(counts$Bracken) %in% bad_taxa),]
+annotation$Bracken <- annotation$Bracken[!(annotation$Bracken$taxa %in% bad_taxa),]
+```
+
+## Match counts samples to metadata samples
+```{r}
+counts <- lapply(counts,
+                 function(x){
+                  colnames(x) <- gsub("_S.*","",colnames(x))
+                  x <- x[,metadata$Sample.ID]
+                  return(x)
+                 })
+```
+
+## Remove low count samples (<10000 counts)
+
+```{r}
+bad_samples <- colnames(counts$Bracken)[colSums(counts$Bracken) < 10000]
+print(bad_samples)
+
+metadata <- metadata[!(metadata$Sample.ID %in% bad_samples),]
+
+counts <- lapply(counts,
+                 function(x){
+                  x <- x[,metadata$Sample.ID]
+                  return(x)
+                 })
+
+```
+
+# Correct counts batch effects using CONQUR
+
+## Set up batch id covariates
+
+```{r}
+batchid <- factor(metadata$run,
+                  levels=c("run1","run2","run3","pilot"))
+
+# conqur.covar <- metadata[,c('subject_id','sample_type','adm_to_sample_days')]
+conqur.covar <- metadata[,c('sample_type','adm_to_sample_days')]
+
+conqur.covar$sample_type <- ifelse(conqur.covar$sample_type=='TA',
+                                  1,
+                                  ifelse(conqur.covar$sample_type=='BAL',
+                                         2,
+                                         ifelse(conqur.covar$sample_type=='UA',3,4)))
+# conqur.covar$sex <- ifelse(conqur.covar$sex=='M',1,2)
+
+```
+
+## Run ConQuR
+```{r}
+counts.raw <- counts
+for(i in 1:length(counts.raw)){
+  counts[[i]] <- t(ConQuR(tax_tab=t(counts.raw[[i]]),
+                          batchid=batchid, 
+                          covariates=conqur.covar, 
+                          batch_ref="run1"))
+  print(i)
+}
+```
+
+# Create R object
+```{r}
+save(metadata,
+     annotation,
+     counts,
+     file=paste0(WORKING.DIR,"/upstream.R"))
+```
+

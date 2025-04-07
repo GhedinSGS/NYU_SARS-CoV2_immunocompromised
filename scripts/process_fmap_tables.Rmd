@@ -1,0 +1,58 @@
+
+```{r}
+WORKING.DIR="X:/mchung/leopoldo_segal_07/"
+run <- "pilot"
+
+module <- read.delim(paste0(WORKING.DIR,"/pipeline_output22/tables/counts.ko.module.fmap.tsv"),check.names = F)
+ortho <- read.delim(paste0(WORKING.DIR,"/pipeline_output22/tables/counts.ko.ortho.fmap.tsv"),check.names = F)
+pathway <- read.delim(paste0(WORKING.DIR,"/pipeline_output22/tables/counts.ko.pathway.fmap.tsv"),check.names = F)
+```
+
+```{r}
+library(KEGGREST)
+
+all_kos <- sort(unique(rownames(pathway)))
+
+ko <- c()
+pathwayko.class <- c()
+for(i in 1:length(all_kos)){
+  ko <- c(ko,all_kos[i])
+  id <- gsub(":.*","",all_kos[i])
+  if(!(id %in% c("map00072","map00281","map00471","map00472","map00473"))){
+    class <- keggGet(id)[[1]]$CLASS
+  }else{
+    class <- NA
+  }
+  if(length(class) != 1){
+    pathwayko.class <-c(pathwayko.class,NA)
+  }else{
+    pathwayko.class <-c(pathwayko.class,class)
+  }
+}
+ko <- ko[!duplicated(ko)]
+df <- as.data.frame(cbind(ko,pathwayko.class))
+
+ko <- ko[grepl("Metabolism;",pathwayko.class) | is.na(pathwayko.class)]
+exclude_kos <- c("map00195: Photosynthesis",
+                 "map00981: Insect hormone biosynthesis",
+                 "map00720: Carbon fixation pathways in prokaryotes",
+                 "map00710: Carbon fixation in photosynthetic organisms")
+ko <- ko[!(ko %in% exclude_kos)]
+
+# write.table(pathway,
+#             paste0(WORKING.DIR,"/pipeline_output/",run,"/tables/counts.ko.pathway.fmap.",run,".tsv"),
+#             row.names = T,
+#             col.names = T,
+#             quote = F,
+#             sep = "\t")
+
+pathway <- pathway[ko,]
+
+write.table(pathway,
+            paste0(WORKING.DIR,"/pipeline_output22/tables/counts.ko.pathway_metabolism.fmap.tsv"),
+            row.names = T,
+            col.names = T,
+            quote = F,
+            sep = "\t")
+```
+
